@@ -52,25 +52,33 @@ Step 4  將 404 統計寫入 combined JSON
 
 ```
 to-analyze-daily-data/
-├── ssr/                    # 商品頁 SSR log CSV
-├── ssg/                    # 商品頁 SSG log CSV
-├── 404-errors/              # 商品頁 404 錯誤 CSV
-├── category/                # 分類頁 log CSV
-└── category-404-errors/     # 分類頁 404 錯誤 CSV
+├── product/
+│   ├── ssr/           # 商品頁 SSR log CSV
+│   ├── ssg/           # 商品頁 SSG log CSV
+│   └── 404-errors/    # 商品頁 404 錯誤 CSV
+└── category/
+    ├── ssr/           # 分類頁 log CSV
+    └── 404-errors/    # 分類頁 404 錯誤 CSV
 
 daily-analysis-result/
 ├── cloudflare/
-│   ├── product/              # 商品頁 cache-hit 統計（日期在檔名裡）
-│   └── category/             # 分類頁 cache-hit 統計
+│   ├── product/        # 商品頁 cache-hit 統計（日期在檔名裡）
+│   └── category/       # 分類頁 cache-hit 統計
 └── datadog-export/
-    ├── ssr/
-    ├── ssg/
+    ├── product/
+    │   ├── ssr/
+    │   └── ssg/
     ├── category/
-    └── combined/
+    │   └── ssr/
+    └── combined/        # 跨頁面合併，不分 page kind
 ```
 
-`daily-analysis-result/` 底下統一「類型資料夾在外層、日期在檔名裡」，跟 `to-analyze-daily-data/`
-一致；`--output` 明確指定時會直接沿用指定路徑，不會再依頁面類型分子資料夾。
+三個地方統一用「page kind（product / category）在外層，資料類型（ssr / ssg / 404-errors）在內層」，
+未來加新頁面類型只需要多一個同層資料夾，不用去每個資料類型底下都補一份。`--output` 明確指定時
+會直接沿用指定路徑，不會再依頁面類型分子資料夾。
+
+> seo-agent 的 `jsonPaths.ssr` 指向 `daily-analysis-result/datadog-export/product/ssr`——如果之後
+> 又調整這裡的資料夾結構，記得同步更新 seo-agent 的設定。
 
 ### 單獨執行子工具
 

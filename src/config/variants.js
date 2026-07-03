@@ -7,11 +7,12 @@
 // 用「頁面+渲染模式」才不會混淆或衝突。
 //
 // 這個命名只影響 registry 內部的 id 與 CLI `--type` 參數值：
-// - inputDirName / outputDirName / filePattern（實際檔案路徑）維持今天的 ssg/ssr/category，
-//   確保 ssr、combined 的輸出檔名逐字不變。
+// - inputDirName / outputDirName 採「page kind 在外層、資料類型在內層」（product/ssr、category/ssr...），
+//   跟 cloudflare/、to-analyze-daily-data/ 的資料夾慣例一致；filePattern（實際檔名）逐字不變，
+//   確保 ssr、combined 的輸出檔名不變（seo-agent 的 jsonPaths 只需要調整資料夾路徑）。
 // - combinedShortKey（combined JSON 內部欄位名，如 data_source_stats.ssr_records、
-//   hourly_request_data_by_type.ssr）也維持 ssg/ssr/category，讓 combined JSON schema 完全不變
-//   （seo-agent 等下游會直接讀這些欄位）。
+//   hourly_request_data_by_type.ssr）維持 ssg/ssr/category，讓 combined JSON schema 完全不變
+//   （seo-agent 直接讀這些欄位）。
 //
 // 要加新頁面類型，只需要在這裡新增一筆設定，不需要碰 src/analyzer/*.js 的邏輯本體。
 
@@ -22,9 +23,9 @@ const VARIANTS = {
     label: 'SSG',
     reportTitle: 'SSG 模式',
     analysisModeLabel: 'Datadog Export SSG 單檔案模式',
-    inputDirName: 'ssg',
+    inputDirName: 'product/ssg',
     filePattern: (d) => `ssg-product-log-${d}.csv`,
-    outputDirName: 'ssg',
+    outputDirName: 'product/ssg',
     excludeUserAgents: ['EsliteDeployValidator/1.0'],
     hasRenderTimeline: false,
     urlBuilder: (rec) => (rec.productId ? `/product/${rec.productId}` : null),
@@ -39,9 +40,9 @@ const VARIANTS = {
     label: 'SSR',
     reportTitle: 'SSR 模式',
     analysisModeLabel: 'Datadog Export SSR 單檔案模式',
-    inputDirName: 'ssr',
+    inputDirName: 'product/ssr',
     filePattern: (d) => `ssr-product-log-${d}.csv`,
-    outputDirName: 'ssr',
+    outputDirName: 'product/ssr',
     excludeUserAgents: [],
     hasRenderTimeline: true,
     urlBuilder: (rec) => (rec.reqId ? `/product/${rec.reqId}` : null),
@@ -62,9 +63,9 @@ const VARIANTS = {
     label: '分類頁',
     reportTitle: '分類頁模式',
     analysisModeLabel: 'Datadog Export 分類頁單檔案模式',
-    inputDirName: 'category',
+    inputDirName: 'category/ssr',
     filePattern: (d) => `category-page-log-${d}.csv`,
-    outputDirName: 'category',
+    outputDirName: 'category/ssr',
     excludeUserAgents: [],
     hasRenderTimeline: true,
     urlBuilder: (rec) => (rec.categoryKey ? `/category/${rec.categoryKey}` : null),
