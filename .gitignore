@@ -1,0 +1,21 @@
+# Node.js
+node_modules/
+npm-debug.log*
+package-lock.json
+
+# Environment variables
+.env
+.env.local
+.env.production
+.env.development
+
+# Analysis Results (Generated Files)
+daily-analysis-result/
+to-analyze-daily-data/
+
+# Data files
+*.csv
+*.log
+
+# OS
+.DS_Store

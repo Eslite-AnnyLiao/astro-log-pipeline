@@ -1,0 +1,17 @@
+{
+  "name": "astro-log-pipeline",
+  "version": "1.0.0",
+  "description": "Eslite Astro 商品頁/分類頁 log 下載與分析 pipeline（從 analysis-log 拆分獨立）",
+  "main": "bin/daily-pipeline.js",
+  "scripts": {
+    "pipeline": "node bin/daily-pipeline.js",
+    "fetch:cloudflare": "node bin/cloudflare-log-fetcher.js",
+    "fetch:datadog": "node bin/datadog-log-fetcher.js",
+    "analyze": "node bin/datadog-export-analyzer.js"
+  },
+  "license": "ISC",
+  "dependencies": {
+    "csv-parse": "^5.6.0",
+    "dotenv": "^17.4.2"
+  }
+}
