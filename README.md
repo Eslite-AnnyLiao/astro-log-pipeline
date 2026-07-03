@@ -59,13 +59,18 @@ to-analyze-daily-data/
 └── category-404-errors/     # 分類頁 404 錯誤 CSV
 
 daily-analysis-result/
-├── cloudflare/<date>/        # cache-hit 統計（依頁面類型分檔）
+├── cloudflare/
+│   ├── product/              # 商品頁 cache-hit 統計（日期在檔名裡）
+│   └── category/             # 分類頁 cache-hit 統計
 └── datadog-export/
     ├── ssr/
     ├── ssg/
     ├── category/
     └── combined/
 ```
+
+`daily-analysis-result/` 底下統一「類型資料夾在外層、日期在檔名裡」，跟 `to-analyze-daily-data/`
+一致；`--output` 明確指定時會直接沿用指定路徑，不會再依頁面類型分子資料夾。
 
 ### 單獨執行子工具
 

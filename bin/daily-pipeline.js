@@ -205,7 +205,7 @@ function mergeCloudflareIntoCombined(dateDigits, pageKindKey) {
   const kind = PAGE_KINDS[pageKindKey];
   const cfPath = path.join(
     PROJECT_ROOT,
-    `./daily-analysis-result/cloudflare/${dateDigits}/cloudflare-cache-hit${kind.cloudflare.fileSuffix}-${dateDigits}.json`,
+    `./daily-analysis-result/cloudflare/${pageKindKey}/cloudflare-cache-hit${kind.cloudflare.fileSuffix}-${dateDigits}.json`,
   );
   const combinedPath = path.join(
     PROJECT_ROOT,
@@ -300,8 +300,8 @@ function printSummary(dateDigits, cfOk, ddOk, analyzerOk) {
   for (const kindKey of Object.keys(PAGE_KINDS)) {
     const kind = PAGE_KINDS[kindKey];
     const base = `cloudflare-cache-hit${kind.cloudflare.fileSuffix}-${dateDigits}`;
-    cfFiles.push(`./daily-analysis-result/cloudflare/${dateDigits}/${base}.json`);
-    cfFiles.push(`./daily-analysis-result/cloudflare/${dateDigits}/${base}.txt`);
+    cfFiles.push(`./daily-analysis-result/cloudflare/${kindKey}/${base}.json`);
+    cfFiles.push(`./daily-analysis-result/cloudflare/${kindKey}/${base}.txt`);
   }
 
   const rawGroups = Object.keys(PAGE_KINDS).map((kindKey) => {

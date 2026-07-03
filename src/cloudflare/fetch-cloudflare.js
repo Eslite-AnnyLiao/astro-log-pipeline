@@ -72,7 +72,7 @@ function buildReport(dateDigits, worker, typeLabel, totalSsrHits, totalSsgHits, 
 }
 
 // 查詢並寫出單一頁面類型的結果
-async function fetchAndSave(args, dateDigits, dateDash, outDir, pageKindKey) {
+async function fetchAndSave(args, dateDigits, dateDash, outputOverride, pageKindKey) {
   const pageKind = PAGE_KINDS[pageKindKey];
   const pathPrefix = pageKind.urlPathPrefix;
   const typeLabel = pageKind.label;
@@ -80,6 +80,10 @@ async function fetchAndSave(args, dateDigits, dateDash, outDir, pageKindKey) {
   const { totalSsrHits, totalSsgHits, hourly } = await fetchAllLogs(
     args.accountId, args.apiToken, dateDigits, args.worker, pathPrefix, typeLabel, buildUTCRange,
   );
+
+  // 預設依頁面類型分資料夾（跟 datadog-export 的結構一致），--output 明確指定時直接沿用（不分頁面類型子資料夾）
+  const outDir = outputOverride || path.join('./daily-analysis-result/cloudflare', pageKindKey);
+  if (!fs.existsSync(outDir)) fs.mkdirSync(outDir, { recursive: true });
 
   const base = `cloudflare-cache-hit${pageKind.cloudflare.fileSuffix}-${dateDigits}`;
   const jsonPath = path.join(outDir, `${base}.json`);
@@ -151,13 +155,10 @@ async function main() {
   console.log(`下載範圍 : ${args.type}`);
   console.log('');
 
-  const outDir = args.output || path.join('./daily-analysis-result/cloudflare', dateDigits);
-  if (!fs.existsSync(outDir)) fs.mkdirSync(outDir, { recursive: true });
-
   const savedLines = [];
 
   for (const kindKey of activeKinds) {
-    const r = await fetchAndSave(args, dateDigits, dateDash, outDir, kindKey);
+    const r = await fetchAndSave(args, dateDigits, dateDash, args.output, kindKey);
     savedLines.push(`• ${PAGE_KINDS[kindKey].label} JSON : ${r.jsonPath}`);
     savedLines.push(`• ${PAGE_KINDS[kindKey].label} 文字 : ${r.txtPath}`);
   }

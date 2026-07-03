@@ -14,7 +14,7 @@
 //   --env     環境（prod|stg），決定 worker 名稱（預設: prod）
 //   --worker  直接指定 Worker script 名稱，傳入時覆蓋 --env
 //   --type    下載範圍，預設 all，可傳 product / category 只查詢其中一種頁面（見 src/config/page-kinds.js）
-//   --output  輸出目錄（預設: ./daily-analysis-result/cloudflare/YYYYMMDD）
+//   --output  輸出目錄（預設: ./daily-analysis-result/cloudflare/<product|category>，依頁面類型分資料夾）
 //   --account-id / --api-token  選填，傳入時覆蓋 .env
 //
 // API: POST /accounts/{id}/workers/observability/telemetry/query
