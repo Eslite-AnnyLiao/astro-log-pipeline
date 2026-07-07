@@ -12,6 +12,7 @@ package-lock.json
 # Analysis Results (Generated Files)
 daily-analysis-result/
 to-analyze-daily-data/
+reports/
 
 # Data files
 *.csv
