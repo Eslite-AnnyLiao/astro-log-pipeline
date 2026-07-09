@@ -54,7 +54,7 @@ Step 4  將 404 統計寫入 combined JSON
 to-analyze-daily-data/
 ├── product/
 │   ├── ssr/           # 商品頁 SSR log CSV
-│   ├── ssg/           # 商品頁 SSG log CSV
+│   ├── ssg/           # 商品頁 SSG 計算結果 JSON（不下載明細，用 product 總請求數－ssr 筆數算出）
 │   └── 404-errors/    # 商品頁 404 錯誤 CSV
 └── category/
     ├── ssr/           # 分類頁 log CSV
@@ -89,13 +89,27 @@ node bin/datadog-log-fetcher.js --date 20260521
 
 # 分析（全部或單一 variant）
 node bin/datadog-export-analyzer.js --type all --date 20260521
-node bin/datadog-export-analyzer.js --type product-ssg --date 20260521
 node bin/datadog-export-analyzer.js --type product-ssr --date 20260521
 node bin/datadog-export-analyzer.js --type category-ssr --date 20260521
 node bin/datadog-export-analyzer.js --type combined --date 20260521
 ```
 
 `--type`/`--date` 都支援只查詢/分析單一頁面類型，例如 `--type category`（fetcher）只下載/查詢分類頁。
+
+SSG 沒有獨立的 `--type product-ssg` 分析報告可跑（不再下載明細，見下方說明），SSG 數量只會出現在
+`--type combined` 的合併報告裡。
+
+### SSG 數量改用計算式取得
+
+Datadog 端不會再有 `product page request | SSG` 這則 log，所以 SSG 不再下載明細 CSV。改為：
+
+1. 下載 `product-ssr` 時順便記錄筆數。
+2. 用 Datadog Aggregate API 查 `@cloudflare.handler_type:fetch @url.path:/product/*` 的總請求數
+   （這個 worker 底下只有 `/product/*`、`/category/*`、`/error/500` 三種 path，沒有其他頁面）。
+3. `ssg_records = product 總請求數 - ssr_records`，寫進 `product/ssg/ssg-count-<date>.json`。
+
+combined 報表裡 `data_source_stats.ssg_records` 會是這個計算值，但「每小時 SSG 分布」
+「各 UA 的 SSG 筆數」等明細欄位固定為 0（沒有逐筆記錄可以拆分）。
 
 ## 架構：如何加一個新頁面類型
 

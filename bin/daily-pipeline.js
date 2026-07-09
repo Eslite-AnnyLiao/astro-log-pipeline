@@ -307,6 +307,10 @@ function printSummary(dateDigits, cfOk, ddOk, analyzerOk) {
   const rawGroups = Object.keys(PAGE_KINDS).map((kindKey) => {
     const kind = PAGE_KINDS[kindKey];
     const files = kind.datadog.subQueries.map((sq) => `./to-analyze-daily-data/${sq.outputDirName}/${sq.filePattern(dateDigits)}`);
+    if (kind.datadog.computedCount) {
+      const cc = kind.datadog.computedCount;
+      files.push(`./to-analyze-daily-data/${cc.outputDirName}/${cc.filePattern(dateDigits)}`);
+    }
     if (kind.datadog.error404) {
       files.push(`./to-analyze-daily-data/${kind.datadog.error404.outputDirName}/${kind.datadog.error404.filePattern(dateDigits)}`);
     }
@@ -315,6 +319,8 @@ function printSummary(dateDigits, cfOk, ddOk, analyzerOk) {
 
   const analyzerFiles = [];
   for (const id of COMBINED_ORDER) {
+    // product-ssg 改用計算值，不再產生獨立的 _analysis.txt/json（見 datadog-export-analyzer 的 runAll）
+    if (id === 'product-ssg') continue;
     const v = VARIANTS[id];
     const base = v.filePattern(dateDigits).replace(/\.csv$/, '');
     analyzerFiles.push(`./daily-analysis-result/datadog-export/${v.outputDirName}/${base}_analysis.txt`);

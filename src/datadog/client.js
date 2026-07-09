@@ -126,4 +126,55 @@ async function fetchAllLogs(apiKey, appKey, query, fromISO, toISO, label) {
   return allLogs;
 }
 
-module.exports = { setDebug, fetchAllLogs };
+// count-only 查詢，不下載明細、不分頁，用於不需要逐筆記錄、只需要總數的場景（例如計算式取得的統計值）
+async function fetchAggregateCount(apiKey, appKey, query, fromISO, toISO, retries = 0) {
+  const url = `https://${DATADOG_SITE}/api/v2/logs/analytics/aggregate`;
+  const headers = { 'DD-API-KEY': apiKey, 'DD-APPLICATION-KEY': appKey };
+  const body = JSON.stringify({
+    compute: [{ aggregation: 'count' }],
+    filter: { query, from: fromISO, to: toISO },
+  });
+
+  let res;
+  try {
+    res = await httpsRequest('POST', url, headers, body);
+  } catch (err) {
+    if (retries < MAX_RETRIES) {
+      console.log(`  [網路錯誤] ${err.message}，10s 後重試 (${retries + 1}/${MAX_RETRIES})...`);
+      await sleep(10_000);
+      return fetchAggregateCount(apiKey, appKey, query, fromISO, toISO, retries + 1);
+    }
+    throw err;
+  }
+
+  if (res.status === 429) {
+    if (retries >= MAX_RETRIES) throw new Error('Rate limit (429) 超過最大重試次數');
+    const resetSec = parseInt(res.headers['x-ratelimit-reset'] || res.headers['retry-after'] || '10', 10);
+    const waitSec = resetSec + 1;
+    console.log(`  [429 Rate Limited] 等待 ${waitSec}s 後重試 (${retries + 1}/${MAX_RETRIES})...`);
+    await sleep(waitSec * 1000);
+    return fetchAggregateCount(apiKey, appKey, query, fromISO, toISO, retries + 1);
+  }
+
+  if (res.status === 500) {
+    if (retries >= MAX_RETRIES) throw new Error(`HTTP 500: ${res.body.slice(0, 500)}`);
+    console.log(`  [500 Server Error] 30s 後重試 (${retries + 1}/${MAX_RETRIES})...`);
+    await sleep(30_000);
+    return fetchAggregateCount(apiKey, appKey, query, fromISO, toISO, retries + 1);
+  }
+
+  if (res.status !== 200) {
+    throw new Error(`HTTP ${res.status}: ${res.body.slice(0, 500)}`);
+  }
+
+  let parsed;
+  try {
+    parsed = JSON.parse(res.body);
+  } catch {
+    throw new Error(`無法解析回應 JSON: ${res.body.slice(0, 200)}`);
+  }
+
+  return parsed.data?.buckets?.[0]?.computes?.c0 ?? 0;
+}
+
+module.exports = { setDebug, fetchAllLogs, fetchAggregateCount };

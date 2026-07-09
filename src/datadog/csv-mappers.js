@@ -25,12 +25,6 @@ function ssrMapRow(log) {
   return [attr.timestamp || '', custom.user_agent ?? '', formatDuration(custom.duration ?? custom['@duration']), attr.message || ''];
 }
 
-function ssgMapRow(log) {
-  const attr = log.attributes || {};
-  const custom = attr.attributes || {};
-  return [attr.timestamp || '', custom.user_agent ?? '', custom['@product_id'] ?? custom.product_id ?? '', attr.message || ''];
-}
-
 function categoryMapRow(log) {
   const attr = log.attributes || {};
   const custom = attr.attributes || {};
@@ -86,7 +80,6 @@ module.exports = {
   formatDuration,
   logsToCsv,
   ssrMapRow,
-  ssgMapRow,
   categoryMapRow,
   extractProductId,
   extractCategoryKey,

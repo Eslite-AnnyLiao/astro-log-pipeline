@@ -4,7 +4,7 @@
 // 要加新頁面類型（例如文章頁），照這個形狀新增一個區塊即可，不需要改
 // src/cloudflare/fetch-cloudflare.js 或 src/datadog/fetch-datadog.js 的邏輯本體。
 
-const { ssrMapRow, ssgMapRow, categoryMapRow, extractProductId, extractCategoryKey } = require('../datadog/csv-mappers');
+const { ssrMapRow, categoryMapRow, extractProductId, extractCategoryKey } = require('../datadog/csv-mappers');
 
 module.exports = {
   product: {
@@ -24,15 +24,18 @@ module.exports = {
           outputDirName: 'product/ssr',
           filePattern: (d) => `ssr-product-log-${d}.csv`,
         },
-        {
-          variant: 'product-ssg',
-          queryTemplate: (w) => `@cloudflare.script_name:${w} message:ssg`,
-          header: 'Date,User agent,@product_id,Content',
-          mapRow: ssgMapRow,
-          outputDirName: 'product/ssg',
-          filePattern: (d) => `ssg-product-log-${d}.csv`,
-        },
       ],
+      // SSG 不再下載明細 log（Datadog 端已不會再有 `product page request | SSG` 這則 log）。
+      // 改用計算式取得數量：product 總請求數（@url.path:/product/* 的 fetch handler log）－ssr 筆數。
+      // 驗證過程見 /Users/liaoliting/.claude/plans/dazzling-crunching-pretzel.md。
+      computedCount: {
+        variant: 'product-ssg',
+        basedOnVariant: 'product-ssr',
+        queryTemplate: (w) =>
+          `@cloud.platform:cloudflare.workers @cloudflare.script_name:${w} @cloudflare.handler_type:fetch @url.path:/product/*`,
+        outputDirName: 'product/ssg',
+        filePattern: (d) => `ssg-count-${d}.json`,
+      },
       error404: {
         queryTemplate: (w) => `@cloud.platform:cloudflare.workers @cloudflare.script_name:${w} status:error @service:ssr-product-page`,
         extractKey: extractProductId,

@@ -94,6 +94,15 @@ async function runCombined(date, output) {
     filesByVariant[id] = findInputByDate(VARIANTS[id], dateDigits, false);
   }
 
+  // product-ssg 改用計算值取得（不再下載明細 CSV），改讀 fetch 階段寫出的計算結果 JSON
+  const recordCountOverrides = {};
+  const ssgCountPath = `./to-analyze-daily-data/product/ssg/ssg-count-${dateDigits}.json`;
+  if (!filesByVariant['product-ssg'] && fs.existsSync(ssgCountPath)) {
+    const ssgCountData = JSON.parse(fs.readFileSync(ssgCountPath, 'utf8'));
+    recordCountOverrides['product-ssg'] = ssgCountData.computed_count;
+    filesByVariant['product-ssg'] = ssgCountPath;
+  }
+
   if (COMBINED_ORDER.every((id) => !filesByVariant[id])) {
     console.error('錯誤: 所有來源檔案均不存在，無法執行 combined 分析');
     process.exit(1);
@@ -108,15 +117,19 @@ async function runCombined(date, output) {
 
   const recordsByVariant = {};
   await Promise.all(COMBINED_ORDER.map(async (id) => {
-    recordsByVariant[id] = filesByVariant[id] ? await readCSV(filesByVariant[id], VARIANTS[id]) : [];
+    // 有 override 的 variant（例如 product-ssg）是計算值，不是 CSV，沒有逐筆記錄可讀
+    recordsByVariant[id] = (filesByVariant[id] && recordCountOverrides[id] == null)
+      ? await readCSV(filesByVariant[id], VARIANTS[id])
+      : [];
   }));
 
   for (const id of COMBINED_ORDER) {
-    if (filesByVariant[id]) console.log(`${VARIANTS[id].combinedShortLabel}: ${recordsByVariant[id].length} 筆`);
+    if (recordCountOverrides[id] != null) console.log(`${VARIANTS[id].combinedShortLabel}: ${recordCountOverrides[id]} 筆（計算值）`);
+    else if (filesByVariant[id]) console.log(`${VARIANTS[id].combinedShortLabel}: ${recordsByVariant[id].length} 筆`);
   }
 
   const combinedAgg = mergeCombinedAggregates(recordsByVariant);
-  const report = generateCombinedReport(dateDigits, filesByVariant, recordsByVariant, combinedAgg);
+  const report = generateCombinedReport(dateDigits, filesByVariant, recordsByVariant, combinedAgg, recordCountOverrides);
 
   const outDir = output || './daily-analysis-result/datadog-export/combined';
   if (!fs.existsSync(outDir)) fs.mkdirSync(outDir, { recursive: true });
@@ -126,7 +139,7 @@ async function runCombined(date, output) {
 
   fs.writeFileSync(txtPath, report, 'utf8');
 
-  const jsonOut = buildCombinedJsonOutput(dateDigits, filesByVariant, recordsByVariant, combinedAgg);
+  const jsonOut = buildCombinedJsonOutput(dateDigits, filesByVariant, recordsByVariant, combinedAgg, recordCountOverrides);
   fs.writeFileSync(jsonPath, JSON.stringify(jsonOut, null, 2), 'utf8');
 
   console.log(`\n分析完成！`);

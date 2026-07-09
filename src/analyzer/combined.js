@@ -82,7 +82,7 @@ function activeLabels(filesByVariant) {
   return COMBINED_ORDER.filter((id) => filesByVariant[id]).map((id) => VARIANTS[id].combinedShortLabel);
 }
 
-function generateCombinedReport(dateDigits, filesByVariant, recordsByVariant, agg) {
+function generateCombinedReport(dateDigits, filesByVariant, recordsByVariant, agg, recordCountOverrides = {}) {
   const { minuteCount, hourCount, uaCount, uaMinutely, uaSecondly } = agg;
   const minStats = calcMinuteStats(minuteCount);
   const allRecords = COMBINED_ORDER.flatMap((id) => recordsByVariant[id] || []);
@@ -111,10 +111,11 @@ function generateCombinedReport(dateDigits, filesByVariant, recordsByVariant, ag
   for (const id of COMBINED_ORDER) {
     const label = VARIANTS[id].combinedShortLabel;
     const file = filesByVariant[id];
-    const count = (recordsByVariant[id] || []).length;
+    const count = recordCountOverrides[id] != null ? recordCountOverrides[id] : (recordsByVariant[id] || []).length;
     lines.push(`• ${label}${labelSep(label)}記錄: ${file ? count + ' 筆' : '0 筆（檔案不存在）'}`);
   }
-  lines.push(`• 合併分析總筆數: ${uaStats.total} 筆`);
+  const overrideSum = Object.values(recordCountOverrides).reduce((s, v) => s + (v || 0), 0);
+  lines.push(`• 合併分析總筆數: ${uaStats.total + overrideSum} 筆${overrideSum ? `（含計算值 ${overrideSum} 筆，未分布到每小時/UA 明細）` : ''}`);
   lines.push('');
 
   const totalHours = Object.keys(hourCount.total).length;
@@ -207,13 +208,14 @@ function generateCombinedReport(dateDigits, filesByVariant, recordsByVariant, ag
   return lines.join('\n');
 }
 
-function buildCombinedJsonOutput(dateDigits, filesByVariant, recordsByVariant, combinedAgg) {
+function buildCombinedJsonOutput(dateDigits, filesByVariant, recordsByVariant, combinedAgg, recordCountOverrides = {}) {
   const minStats = calcMinuteStats(combinedAgg.minuteCount);
   const allRecords = COMBINED_ORDER.flatMap((id) => recordsByVariant[id] || []);
   const peakUA = calcPeakMinuteUA(combinedAgg.minuteCount, allRecords, null);
   const hf = calcHighFreq(combinedAgg.uaMinutely, combinedAgg.uaSecondly);
   const uaStats = calcCombinedUAStats(combinedAgg.uaCount);
   const combinedTotal = Object.values(combinedAgg.uaCount.total).reduce((s, v) => s + v, 0);
+  const overrideSum = Object.values(recordCountOverrides).reduce((s, v) => s + (v || 0), 0);
   const totalHours = Object.keys(combinedAgg.hourCount.total).length;
   const avgPerHour = totalHours
     ? Math.round((Object.values(combinedAgg.hourCount.total).reduce((s, v) => s + v, 0) / totalHours) * 100) / 100
@@ -225,10 +227,10 @@ function buildCombinedJsonOutput(dateDigits, filesByVariant, recordsByVariant, c
   for (const id of COMBINED_ORDER) {
     const key = VARIANTS[id].combinedShortKey;
     file_info[`${key}_file`] = filesByVariant[id] || null;
-    data_source_stats[`${key}_records`] = (recordsByVariant[id] || []).length;
+    data_source_stats[`${key}_records`] = recordCountOverrides[id] != null ? recordCountOverrides[id] : (recordsByVariant[id] || []).length;
     hourly_request_data_by_type[key] = combinedAgg.hourCount[key];
   }
-  data_source_stats.total_records = combinedTotal;
+  data_source_stats.total_records = combinedTotal + overrideSum;
 
   return {
     analysis_time: new Date().toISOString(),

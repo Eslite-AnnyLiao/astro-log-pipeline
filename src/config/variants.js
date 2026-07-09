@@ -17,6 +17,9 @@
 // 要加新頁面類型，只需要在這裡新增一筆設定，不需要碰 src/analyzer/*.js 的邏輯本體。
 
 const VARIANTS = {
+  // SSG 不再下載明細 CSV，數量改用計算式取得（見 src/config/page-kinds.js 的 computedCount、
+  // src/analyzer/analyze.js 的 runCombined）。filePattern 保留只是讓 findInputByDate 的既有
+  // 「檔案不存在」容錯路徑正常運作（永遠找不到、回傳 null），不會有真的 CSV 產生。
   'product-ssg': {
     id: 'product-ssg',
     pageKind: 'product',

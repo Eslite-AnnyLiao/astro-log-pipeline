@@ -5,7 +5,7 @@ const fs = require('fs');
 const path = require('path');
 
 const { normalizeDate, buildTWRange } = require('../lib/time');
-const { setDebug, fetchAllLogs } = require('./client');
+const { setDebug, fetchAllLogs, fetchAggregateCount } = require('./client');
 const { logsToCsv, process404Logs, logs404ToCsv } = require('./csv-mappers');
 const PAGE_KINDS = require('../config/page-kinds');
 
@@ -79,14 +79,35 @@ async function main() {
 
   for (const kindKey of activeKinds) {
     const kind = PAGE_KINDS[kindKey];
+    const subQueryCounts = {};
 
     for (const sq of kind.datadog.subQueries) {
       const logs = await fetchAllLogs(args.apiKey, args.appKey, sq.queryTemplate(worker), fromISO, toISO, sq.variant);
+      subQueryCounts[sq.variant] = logs.length;
       const outDir = `./to-analyze-daily-data/${sq.outputDirName}`;
       fs.mkdirSync(outDir, { recursive: true });
       const outPath = path.join(outDir, sq.filePattern(dateDigits));
       fs.writeFileSync(outPath, logsToCsv(logs, { header: sq.header, mapRow: sq.mapRow }), 'utf8');
       savedLines.push(`• ${sq.variant} : ${outPath}  (${logs.length} 筆)`);
+    }
+
+    if (kind.datadog.computedCount) {
+      const cc = kind.datadog.computedCount;
+      const basedOnCount = subQueryCounts[cc.basedOnVariant] || 0;
+      const pathTotal = await fetchAggregateCount(args.apiKey, args.appKey, cc.queryTemplate(worker), fromISO, toISO);
+      const computedCount = Math.max(0, pathTotal - basedOnCount);
+      const outDir = `./to-analyze-daily-data/${cc.outputDirName}`;
+      fs.mkdirSync(outDir, { recursive: true });
+      const outPath = path.join(outDir, cc.filePattern(dateDigits));
+      fs.writeFileSync(outPath, JSON.stringify({
+        date: dateDash,
+        variant: cc.variant,
+        path_total: pathTotal,
+        based_on_variant: cc.basedOnVariant,
+        based_on_count: basedOnCount,
+        computed_count: computedCount,
+      }, null, 2), 'utf8');
+      savedLines.push(`• ${cc.variant} (計算值) : ${outPath}  (${computedCount} 筆 = ${pathTotal} - ${basedOnCount})`);
     }
 
     if (kind.datadog.error404) {
