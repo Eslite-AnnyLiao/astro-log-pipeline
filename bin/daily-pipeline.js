@@ -504,7 +504,11 @@ async function main() {
   if (display.cf.error || display.dd.error || display.analyzer.error) process.exit(1);
 }
 
-main().catch((err) => {
-  console.error('執行錯誤:', err.message);
-  process.exit(1);
-});
+if (require.main === module) {
+  main().catch((err) => {
+    console.error('執行錯誤:', err.message);
+    process.exit(1);
+  });
+}
+
+module.exports = { mergeCloudflareIntoCombined, mergeErrors404IntoCombined };

@@ -22,15 +22,17 @@ function parseUA(ua) {
   if (ua.includes('Windows NT 10.0')) os = 'Windows 10/11';
   else if (ua.includes('Windows NT 6.1')) os = 'Windows 7';
   else if (ua.includes('Windows NT')) os = 'Windows';
+  // iPhone/iPad UA 字串一律含有字面上的 "like Mac OS X"，必須先判斷才不會被下面的
+  // Mac OS X 分支誤判成桌面版 macOS
+  else if (ua.includes('iPhone')) os = 'iOS (iPhone)';
+  else if (ua.includes('iPad')) os = 'iOS (iPad)';
   else if (ua.includes('Mac OS X')) {
     const m = ua.match(/Mac OS X ([\d_]+)/);
     os = m ? `macOS ${m[1].replace(/_/g, '.')}` : 'macOS';
   } else if (ua.includes('Android')) {
     const m = ua.match(/Android ([\d.]+)/);
     os = m ? `Android ${m[1]}` : 'Android';
-  } else if (ua.includes('iPhone')) os = 'iOS (iPhone)';
-  else if (ua.includes('iPad')) os = 'iOS (iPad)';
-  else if (ua.includes('Linux')) os = 'Linux';
+  } else if (ua.includes('Linux')) os = 'Linux';
   return { browser, os };
 }
 
