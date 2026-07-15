@@ -7,7 +7,8 @@
     "pipeline": "node bin/daily-pipeline.js",
     "fetch:cloudflare": "node bin/cloudflare-log-fetcher.js",
     "fetch:datadog": "node bin/datadog-log-fetcher.js",
-    "analyze": "node bin/datadog-export-analyzer.js"
+    "analyze": "node bin/datadog-export-analyzer.js",
+    "test": "node --test"
   },
   "license": "ISC",
   "dependencies": {

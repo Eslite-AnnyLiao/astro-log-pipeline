@@ -22,8 +22,13 @@ const fs = require('fs');
 
 const PAGE_KINDS = require('../src/config/page-kinds');
 const { VARIANTS, COMBINED_ORDER } = require('../src/config/variants');
+const { retryAsync } = require('../src/lib/retry');
 
 const PROJECT_ROOT = path.join(__dirname, '..');
+
+// CF / DD fetcher 整支 script 失敗時各自獨立重試（不影響另一個已成功的下載）
+const FETCH_MAX_ATTEMPTS = 3;
+const FETCH_RETRY_DELAY_MS = 5000;
 
 function parseArgs(argv) {
   const args = { date: null, env: 'prod', debug: false, analyzeOnly: false, mergeCfOnly: false };
@@ -397,20 +402,48 @@ async function main() {
 
     display.start();
 
-    const cfPromise = runWithProgress(
-      'cloudflare-log-fetcher.js',
-      ['--date', dateDigits, ...envFlag, ...debugFlag],
-      (line) => parseCFLine(line, display),
-      'CF',
+    const cfPromise = retryAsync(
+      (attempt) => {
+        if (attempt > 1) {
+          display.cf.hours = 0;
+          display.cf.hits = 0;
+        }
+        return runWithProgress(
+          'cloudflare-log-fetcher.js',
+          ['--date', dateDigits, ...envFlag, ...debugFlag],
+          (line) => parseCFLine(line, display),
+          'CF',
+        );
+      },
+      {
+        attempts: FETCH_MAX_ATTEMPTS,
+        delayMs: FETCH_RETRY_DELAY_MS,
+        onError: (err, attempt) =>
+          console.log(`\n  [CF] 下載失敗（第 ${attempt}/${FETCH_MAX_ATTEMPTS} 次）：${err.message}`),
+      },
     )
       .then(() => { display.cf.done = true; })
       .catch((err) => { display.cf.error = err.message.slice(0, 40); });
 
-    const ddPromise = runWithProgress(
-      'datadog-log-fetcher.js',
-      ['--date', dateDigits, ...envFlag, ...debugFlag],
-      (line) => parseDDLine(line, display),
-      'DD',
+    const ddPromise = retryAsync(
+      (attempt) => {
+        if (attempt > 1) {
+          display.dd.pages = 0;
+          display.dd.startTime = null;
+        }
+        return runWithProgress(
+          'datadog-log-fetcher.js',
+          ['--date', dateDigits, ...envFlag, ...debugFlag],
+          (line) => parseDDLine(line, display),
+          'DD',
+        );
+      },
+      {
+        attempts: FETCH_MAX_ATTEMPTS,
+        delayMs: FETCH_RETRY_DELAY_MS,
+        onError: (err, attempt) =>
+          console.log(`\n  [DD] 下載失敗（第 ${attempt}/${FETCH_MAX_ATTEMPTS} 次）：${err.message}`),
+      },
     )
       .then(() => { display.dd.done = true; })
       .catch((err) => { display.dd.error = err.message.slice(0, 40); });
