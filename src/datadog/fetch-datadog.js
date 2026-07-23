@@ -4,15 +4,16 @@ require('dotenv').config();
 const fs = require('fs');
 const path = require('path');
 
-const { normalizeDate, buildTWRange } = require('../lib/time');
+const { normalizeDate, buildTWRange, buildTWWindows } = require('../lib/time');
 const { setDebug, fetchAllLogs, fetchAggregateCount } = require('./client');
-const { logsToCsv, process404Logs, logs404ToCsv } = require('./csv-mappers');
+const { writePageRows, merge404Logs, logs404ToCsv } = require('./csv-mappers');
 const PAGE_KINDS = require('../config/page-kinds');
 
 const DATADOG_API_KEY = process.env.DATADOG_API_KEY;
 const DATADOG_APP_KEY = process.env.DATADOG_APP_KEY;
 const WORKER_PRD = 'astro-worker-prd';
 const WORKER_STG = 'astro-worker-stg';
+const ERROR_404_WINDOW_HOURS = 4;
 
 function parseArgs(argv) {
   const args = {
@@ -82,13 +83,27 @@ async function main() {
     const subQueryCounts = {};
 
     for (const sq of kind.datadog.subQueries) {
-      const logs = await fetchAllLogs(args.apiKey, args.appKey, sq.queryTemplate(worker), fromISO, toISO, sq.variant);
-      subQueryCounts[sq.variant] = logs.length;
+      // 逐頁邊抓邊寫進暫存檔，不把整批 log 留在記憶體（日下載量可能上看百萬筆）；
+      // 全部抓完才 rename 成正式檔名，中途失敗 tmp 檔會留下但正式檔名不受影響（要嘛完整、要嘛沒有）。
       const outDir = `./to-analyze-daily-data/${sq.outputDirName}`;
       fs.mkdirSync(outDir, { recursive: true });
       const outPath = path.join(outDir, sq.filePattern(dateDigits));
-      fs.writeFileSync(outPath, logsToCsv(logs, { header: sq.header, mapRow: sq.mapRow }), 'utf8');
-      savedLines.push(`• ${sq.variant} : ${outPath}  (${logs.length} 筆)`);
+      const tmpPath = `${outPath}.tmp`;
+      const ws = fs.createWriteStream(tmpPath, { flags: 'w' });
+      let streamError = null;
+      ws.on('error', (err) => { streamError = err; });
+      ws.write(`${sq.header}\n`);
+
+      const total = await fetchAllLogs(args.apiKey, args.appKey, sq.queryTemplate(worker), fromISO, toISO, sq.variant, async (page) => {
+        if (streamError) throw streamError;
+        await writePageRows(ws, page, sq.mapRow);
+      });
+      if (streamError) throw streamError;
+      await new Promise((resolve, reject) => ws.end((err) => (err ? reject(err) : resolve())));
+      fs.renameSync(tmpPath, outPath);
+
+      subQueryCounts[sq.variant] = total;
+      savedLines.push(`• ${sq.variant} : ${outPath}  (${total} 筆)`);
     }
 
     if (kind.datadog.computedCount) {
@@ -112,13 +127,32 @@ async function main() {
 
     if (kind.datadog.error404) {
       const e = kind.datadog.error404;
-      const logs = await fetchAllLogs(args.apiKey, args.appKey, e.queryTemplate(worker), fromISO, toISO, `404-${kindKey}`);
-      const map = process404Logs(logs, e.extractKey);
+      const map = new Map();
+      const windows = buildTWWindows(dateDigits, e.windowHours || ERROR_404_WINDOW_HOURS);
+      let raw404Total = 0;
+      console.log(`[404-${kindKey}] 分 ${windows.length} 段查詢（每 ${e.windowHours || ERROR_404_WINDOW_HOURS} 小時）`);
+
+      for (let i = 0; i < windows.length; i++) {
+        const w = windows[i];
+        console.log(`  時間窗 ${i + 1}/${windows.length}: ${w.label}`);
+        raw404Total += await fetchAllLogs(
+          args.apiKey,
+          args.appKey,
+          e.queryTemplate(worker),
+          w.fromISO,
+          w.toISO,
+          `404-${kindKey} ${w.label}`,
+          async (page) => {
+            merge404Logs(page, e.extractKey, map);
+          },
+        );
+      }
+
       const outDir = `./to-analyze-daily-data/${e.outputDirName}`;
       fs.mkdirSync(outDir, { recursive: true });
       const outPath = path.join(outDir, e.filePattern(dateDigits));
       fs.writeFileSync(outPath, logs404ToCsv(map, e.keyLabel), 'utf8');
-      savedLines.push(`• 404(${kind.label}) : ${outPath}  (共 ${map.size} 個)`);
+      savedLines.push(`• 404(${kind.label}) : ${outPath}  (共 ${map.size} 個 key，掃描 ${raw404Total} 筆)`);
     }
   }
 

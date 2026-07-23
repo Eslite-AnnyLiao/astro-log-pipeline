@@ -1,5 +1,6 @@
 'use strict';
 
+const { once } = require('events');
 const { csvRow } = require('../lib/csv');
 
 function formatDuration(raw) {
@@ -34,6 +35,16 @@ function categoryMapRow(log) {
   ];
 }
 
+// 把一頁 log 逐筆轉成 CSV 行寫進 write stream，遵守 backpressure（write() 回傳 false 時等 'drain'
+// 再繼續），避免大量資料下載時把整批筆數堆在 stream 內部 buffer 而非磁碟、失去 streaming 省記憶體的意義。
+async function writePageRows(ws, page, mapRow) {
+  for (const log of page) {
+    if (!ws.write(csvRow(...mapRow(log)) + '\n')) {
+      await once(ws, 'drain');
+    }
+  }
+}
+
 function extractProductId(custom) {
   return custom.productId ?? custom['@productId'] ?? custom.product_id ?? custom['@product_id'] ?? null;
 }
@@ -49,8 +60,7 @@ function extractCategoryKey(custom) {
 
 // 回傳 Map<key, Set<traceId>>（key 由 extractKeyFn 決定，商品頁是 productId，分類頁是 L1/L2/L3）
 // 同一次 page load（相同 trace_id）的不同 API 404 算同一次
-function process404Logs(logs, extractKeyFn) {
-  const result = new Map(); // key -> Set<traceId>
+function merge404Logs(logs, extractKeyFn, result = new Map()) {
   for (const log of logs) {
     const attr = log.attributes || {};
     const custom = attr.attributes || {};
@@ -68,6 +78,10 @@ function process404Logs(logs, extractKeyFn) {
   return result;
 }
 
+function process404Logs(logs, extractKeyFn) {
+  return merge404Logs(logs, extractKeyFn);
+}
+
 function logs404ToCsv(result, keyLabel) {
   const rows = [`${keyLabel},404 次數`];
   for (const [key, traces] of result) {
@@ -79,10 +93,12 @@ function logs404ToCsv(result, keyLabel) {
 module.exports = {
   formatDuration,
   logsToCsv,
+  writePageRows,
   ssrMapRow,
   categoryMapRow,
   extractProductId,
   extractCategoryKey,
+  merge404Logs,
   process404Logs,
   logs404ToCsv,
 };

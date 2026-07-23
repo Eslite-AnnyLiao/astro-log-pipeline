@@ -1,6 +1,7 @@
 'use strict';
 
-const { sleep, httpsRequest } = require('../lib/http');
+const http = require('../lib/http');
+const { sleep } = http;
 
 const DATADOG_SITE = 'api.us5.datadoghq.com';
 const PAGE_LIMIT = 1000;
@@ -22,7 +23,7 @@ async function fetchLogsPage(apiKey, appKey, params, retries = 0) {
 
   let res;
   try {
-    res = await httpsRequest('POST', url, headers, JSON.stringify(params));
+    res = await http.httpsRequest('POST', url, headers, JSON.stringify(params));
   } catch (err) {
     if (retries < MAX_RETRIES) {
       console.log(`  [網路錯誤] ${err.message}，10s 後重試 (${retries + 1}/${MAX_RETRIES})...`);
@@ -85,12 +86,16 @@ async function throttleByRateLimit(headers) {
   }
 }
 
-async function fetchAllLogs(apiKey, appKey, query, fromISO, toISO, label) {
+// onPage 為 optional callback：傳了就每頁呼叫 onPage(data) 而不在記憶體中累積整批 log
+// （給量體可能上看百萬筆的查詢用，避免整批常駐記憶體導致 OOM），回傳總筆數而非陣列。
+// 不傳 onPage 時行為與過去一致：回傳累積好的完整 log 陣列，供小量查詢或測試使用。
+async function fetchAllLogs(apiKey, appKey, query, fromISO, toISO, label, onPage) {
   console.log(`[${label}] Query: ${query}`);
 
-  const allLogs = [];
+  const allLogs = onPage ? null : [];
   let cursor = null;
   let page = 1;
+  let total = 0;
   let firstLogPrinted = false;
 
   while (true) {
@@ -111,8 +116,13 @@ async function fetchAllLogs(apiKey, appKey, query, fromISO, toISO, label) {
       firstLogPrinted = true;
     }
 
-    allLogs.push(...data);
-    console.log(` ${data.length} 筆（累計 ${allLogs.length}）`);
+    if (onPage) {
+      await onPage(data);
+    } else {
+      allLogs.push(...data);
+    }
+    total += data.length;
+    console.log(` ${data.length} 筆（累計 ${total}）`);
 
     const nextCursor = result.meta?.page?.after;
     if (!nextCursor || data.length === 0) break;
@@ -122,8 +132,8 @@ async function fetchAllLogs(apiKey, appKey, query, fromISO, toISO, label) {
     await throttleByRateLimit(headers);
   }
 
-  console.log(`  共 ${allLogs.length} 筆\n`);
-  return allLogs;
+  console.log(`  共 ${total} 筆\n`);
+  return onPage ? total : allLogs;
 }
 
 // count-only 查詢，不下載明細、不分頁，用於不需要逐筆記錄、只需要總數的場景（例如計算式取得的統計值）
@@ -137,7 +147,7 @@ async function fetchAggregateCount(apiKey, appKey, query, fromISO, toISO, retrie
 
   let res;
   try {
-    res = await httpsRequest('POST', url, headers, body);
+    res = await http.httpsRequest('POST', url, headers, body);
   } catch (err) {
     if (retries < MAX_RETRIES) {
       console.log(`  [網路錯誤] ${err.message}，10s 後重試 (${retries + 1}/${MAX_RETRIES})...`);

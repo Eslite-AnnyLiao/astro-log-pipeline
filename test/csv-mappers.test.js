@@ -2,13 +2,16 @@
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
+const { Writable } = require('stream');
 const {
   formatDuration,
   logsToCsv,
+  writePageRows,
   ssrMapRow,
   categoryMapRow,
   extractProductId,
   extractCategoryKey,
+  merge404Logs,
   process404Logs,
   logs404ToCsv,
 } = require('../src/datadog/csv-mappers');
@@ -38,6 +41,37 @@ test('logsToCsv：header 加上每筆記錄依 mapRow 轉出的欄位', () => {
     { header: 'a,b', mapRow: (log) => [log.a, log.b] },
   );
   assert.equal(csv, 'a,b\n1,x\n2,y');
+});
+
+test('writePageRows：逐行寫入，內容與順序正確', async () => {
+  const written = [];
+  const ws = new Writable({
+    write(chunk, _enc, cb) { written.push(chunk.toString()); cb(); },
+  });
+
+  await writePageRows(ws, [{ a: 1, b: 'x' }, { a: 2, b: 'y' }], (log) => [log.a, log.b]);
+
+  assert.deepEqual(written, ['1,x\n', '2,y\n']);
+});
+
+test('writePageRows：write() 回傳 false 時會等 drain 才繼續寫下一行（避免資料堆積在 stream buffer 裡而失去省記憶體的意義）', async () => {
+  const written = [];
+  let drainCount = 0;
+  // highWaterMark 設得極小，讓每次 write 都超過門檻回傳 false，強迫這個函式一定要走 drain 分支
+  const ws = new Writable({
+    highWaterMark: 1,
+    write(chunk, _enc, cb) {
+      written.push(chunk.toString());
+      setImmediate(cb); // 模擬非同步磁碟寫入，讓呼叫端有機會在 callback 前就疊加下一筆
+    },
+  });
+  ws.on('drain', () => { drainCount++; });
+
+  const page = [{ a: 1, b: 'x' }, { a: 2, b: 'y' }, { a: 3, b: 'z' }];
+  await writePageRows(ws, page, (log) => [log.a, log.b]);
+
+  assert.deepEqual(written, ['1,x\n', '2,y\n', '3,z\n']); // 內容與順序仍然正確
+  assert.ok(drainCount > 0, '應該至少觸發一次 drain，證明真的有走等待路徑，而不是把資料硬塞進 buffer');
 });
 
 test('ssrMapRow：從 attributes.attributes 取出 user_agent/duration，缺值以空字串代替', () => {
@@ -94,6 +128,23 @@ test('process404Logs：同一 key 下相同 trace_id 視為同一次，只非 40
   assert.equal(result.size, 2);
   assert.equal(result.get('p1').size, 2);
   assert.equal(result.get('p2').size, 1);
+});
+
+test('merge404Logs：可把多頁 404 log 累加到同一個 Map 並去重 trace_id', () => {
+  const result = new Map();
+  merge404Logs([
+    { attributes: { attributes: { httpStatus: 404, productId: 'p1', otel: { trace_id: 't1' } } } },
+    { attributes: { attributes: { httpStatus: 500, productId: 'p1', otel: { trace_id: 't2' } } } },
+  ], extractProductId, result);
+  merge404Logs([
+    { attributes: { attributes: { httpStatus: 404, productId: 'p1', otel: { trace_id: 't1' } } } },
+    { attributes: { attributes: { httpStatus: 404, productId: 'p1', otel: { trace_id: 't3' } } } },
+    { attributes: { attributes: { httpStatus: 404, productId: 'p2', otel: { trace_id: 't4' } } } },
+  ], extractProductId, result);
+
+  assert.equal(result.size, 2);
+  assert.deepEqual([...result.get('p1')].sort(), ['t1', 't3']);
+  assert.deepEqual([...result.get('p2')], ['t4']);
 });
 
 test('logs404ToCsv：輸出 header 與每個 key 的 404 次數（Set 大小）', () => {
