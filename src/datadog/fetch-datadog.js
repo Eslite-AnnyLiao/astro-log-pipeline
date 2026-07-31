@@ -5,8 +5,8 @@ const fs = require('fs');
 const path = require('path');
 
 const { normalizeDate, buildTWRange, buildTWWindows } = require('../lib/time');
-const { setDebug, fetchAllLogs, fetchAggregateCount } = require('./client');
-const { writePageRows, merge404Logs, logs404ToCsv } = require('./csv-mappers');
+const { setDebug, fetchAllLogs, fetchAggregateCount, fetchAggregate404Counts } = require('./client');
+const { writePageRows, merge404Logs, logs404ToCsv, counts404ToCsv } = require('./csv-mappers');
 const PAGE_KINDS = require('../config/page-kinds');
 
 const DATADOG_API_KEY = process.env.DATADOG_API_KEY;
@@ -23,6 +23,7 @@ function parseArgs(argv) {
     env: 'prd',
     type: 'all',
     debug: false,
+    only404: false,
   };
   for (let i = 2; i < argv.length; i++) {
     if (argv[i] === '--api-key' && argv[i + 1]) args.apiKey = argv[++i];
@@ -31,6 +32,7 @@ function parseArgs(argv) {
     else if (argv[i] === '--env' && argv[i + 1]) args.env = argv[++i];
     else if (argv[i] === '--type' && argv[i + 1]) args.type = argv[++i];
     else if (argv[i] === '--debug') args.debug = true;
+    else if (argv[i] === '--only-404') args.only404 = true;
   }
   return args;
 }
@@ -71,7 +73,7 @@ async function main() {
   console.log('Datadog Log Fetcher');
   console.log('='.repeat(48));
   console.log(`環境     : ${args.env} (${worker})`);
-  console.log(`下載範圍 : ${args.type}`);
+  console.log(`下載範圍 : ${args.type}${args.only404 ? '（只補 404）' : ''}`);
   console.log(`查詢日期 : ${dateDash} 00:00:00 ~ 23:59:59 (台灣時區)`);
   console.log(`時間範圍 : ${fromISO} ~ ${toISO}`);
   console.log('');
@@ -82,7 +84,7 @@ async function main() {
     const kind = PAGE_KINDS[kindKey];
     const subQueryCounts = {};
 
-    for (const sq of kind.datadog.subQueries) {
+    if (!args.only404) for (const sq of kind.datadog.subQueries) {
       // 逐頁邊抓邊寫進暫存檔，不把整批 log 留在記憶體（日下載量可能上看百萬筆）；
       // 全部抓完才 rename 成正式檔名，中途失敗 tmp 檔會留下但正式檔名不受影響（要嘛完整、要嘛沒有）。
       const outDir = `./to-analyze-daily-data/${sq.outputDirName}`;
@@ -106,7 +108,7 @@ async function main() {
       savedLines.push(`• ${sq.variant} : ${outPath}  (${total} 筆)`);
     }
 
-    if (kind.datadog.computedCount) {
+    if (!args.only404 && kind.datadog.computedCount) {
       const cc = kind.datadog.computedCount;
       const basedOnCount = subQueryCounts[cc.basedOnVariant] || 0;
       const pathTotal = await fetchAggregateCount(args.apiKey, args.appKey, cc.queryTemplate(worker), fromISO, toISO);
@@ -127,6 +129,31 @@ async function main() {
 
     if (kind.datadog.error404) {
       const e = kind.datadog.error404;
+      const outDir = `./to-analyze-daily-data/${e.outputDirName}`;
+      fs.mkdirSync(outDir, { recursive: true });
+      const outPath = path.join(outDir, e.filePattern(dateDigits));
+
+      if (e.aggregate) {
+        try {
+          const aggregateResult = await fetchAggregate404Counts(
+            args.apiKey,
+            args.appKey,
+            { ...e.aggregate, query: e.aggregate.queryTemplate(worker) },
+            fromISO,
+            toISO,
+            `404-${kindKey}`,
+          );
+          fs.writeFileSync(outPath, counts404ToCsv(aggregateResult.rows, e.keyLabel), 'utf8');
+          savedLines.push(
+            `• 404(${kind.label}) : ${outPath}  (共 ${aggregateResult.rows.length} 個 key，distinct ${aggregateResult.distinctCountTotal} 次，raw ${aggregateResult.rawCountTotal} 筆)`,
+          );
+          continue;
+        } catch (err) {
+          if (err.code !== 'DATADOG_AGGREGATE_PAGING_LIMIT') throw err;
+          console.log(`  ⚠️  ${kind.label} 404 Aggregate 超過 Datadog bucket paging 上限，改用 streaming 明細分段查詢`);
+        }
+      }
+
       const map = new Map();
       const windows = buildTWWindows(dateDigits, e.windowHours || ERROR_404_WINDOW_HOURS);
       let raw404Total = 0;
@@ -147,10 +174,6 @@ async function main() {
           },
         );
       }
-
-      const outDir = `./to-analyze-daily-data/${e.outputDirName}`;
-      fs.mkdirSync(outDir, { recursive: true });
-      const outPath = path.join(outDir, e.filePattern(dateDigits));
       fs.writeFileSync(outPath, logs404ToCsv(map, e.keyLabel), 'utf8');
       savedLines.push(`• 404(${kind.label}) : ${outPath}  (共 ${map.size} 個 key，掃描 ${raw404Total} 筆)`);
     }

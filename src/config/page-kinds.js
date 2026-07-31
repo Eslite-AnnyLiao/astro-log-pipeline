@@ -38,6 +38,12 @@ module.exports = {
       },
       error404: {
         queryTemplate: (w) => `@cloud.platform:cloudflare.workers @cloudflare.script_name:${w} status:error @service:ssr-product-page`,
+        aggregate: {
+          queryTemplate: (w) => `@cloudflare.script_name:${w} @service:ssr-product-page @name:page-render @httpStatus:404`,
+          groupByFacets: ['@productId'],
+          keyLabels: ['ProductId'],
+          traceFacet: '@otel.trace_id',
+        },
         extractKey: extractProductId,
         keyLabel: 'ProductId',
         outputDirName: 'product/404-errors',

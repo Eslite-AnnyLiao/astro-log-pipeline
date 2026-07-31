@@ -14,6 +14,7 @@ const {
   merge404Logs,
   process404Logs,
   logs404ToCsv,
+  counts404ToCsv,
 } = require('../src/datadog/csv-mappers');
 
 test('formatDuration：null/空字串 → 空字串', () => {
@@ -153,4 +154,11 @@ test('logs404ToCsv：輸出 header 與每個 key 的 404 次數（Set 大小）'
     ['p2', new Set(['t4'])],
   ]);
   assert.equal(logs404ToCsv(result, 'product_id'), 'product_id,404 次數\np1,2\np2,1');
+});
+
+test('counts404ToCsv：輸出 Aggregate API 已算好的 404 distinct 次數', () => {
+  assert.equal(counts404ToCsv([
+    { key: 'p1', count: 2, rawCount: 3 },
+    { key: 'p2', count: 1, rawCount: 1 },
+  ], 'ProductId'), 'ProductId,404 次數\np1,2\np2,1');
 });

@@ -90,6 +90,14 @@ function logs404ToCsv(result, keyLabel) {
   return rows.join('\n');
 }
 
+function counts404ToCsv(rows, keyLabel) {
+  const csvRows = [`${keyLabel},404 次數`];
+  for (const row of rows) {
+    csvRows.push(csvRow(row.key, String(row.count)));
+  }
+  return csvRows.join('\n');
+}
+
 module.exports = {
   formatDuration,
   logsToCsv,
@@ -101,4 +109,5 @@ module.exports = {
   merge404Logs,
   process404Logs,
   logs404ToCsv,
+  counts404ToCsv,
 };

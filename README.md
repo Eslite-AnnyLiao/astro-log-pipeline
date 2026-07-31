@@ -31,6 +31,10 @@ node bin/daily-pipeline.js --date 20260521 --analyze-only
 # 只將既有的 CF JSON / 404 CSV merge 進既有的 combined JSON
 node bin/daily-pipeline.js --date 20260521 --merge-cf-only
 
+# 只補 Datadog 404 CSV，再 merge 回既有 combined JSON
+node bin/datadog-log-fetcher.js --date 20260521 --only-404
+node bin/daily-pipeline.js --date 20260521 --merge-cf-only
+
 # 指定環境（預設 prod）
 node bin/daily-pipeline.js --date 20260521 --env stg
 ```
@@ -86,6 +90,7 @@ daily-analysis-result/
 # 下載
 node bin/cloudflare-log-fetcher.js --date 20260521
 node bin/datadog-log-fetcher.js --date 20260521
+node bin/datadog-log-fetcher.js --date 20260521 --only-404
 
 # 分析（全部或單一 variant）
 node bin/datadog-export-analyzer.js --type all --date 20260521
