@@ -63,7 +63,7 @@ const CF_TOTAL_HOURS = Object.keys(PAGE_KINDS).length * 24;
 class ProgressDisplay {
   constructor() {
     this.cf = { hours: 0, hits: 0, done: false, error: null };
-    this.dd = { pages: 0, done: false, error: null, startTime: null };
+    this.dd = { pages: 0, aggregatePages: 0, done: false, error: null, startTime: null };
     this.analyzer = { state: 'waiting', done: false, error: null };
 
     this._spinIdx = 0;
@@ -106,9 +106,9 @@ class ProgressDisplay {
     if (this.dd.error) {
       ddInfo = `\x1b[31m✗ 失敗\x1b[0m`;
     } else if (this.dd.done) {
-      ddInfo = `\x1b[32m✓ 完成  共 ${this.dd.pages} 頁\x1b[0m`;
+      ddInfo = `\x1b[32m✓ 完成  明細 ${this.dd.pages} 頁  聚合 ${this.dd.aggregatePages} 頁\x1b[0m`;
     } else {
-      let detail = `已處理 ${this.dd.pages} 頁`;
+      let detail = `明細 ${this.dd.pages} 頁  聚合 ${this.dd.aggregatePages} 頁`;
       if (this.dd.startTime && this.dd.pages >= 2) {
         const elapsedS = (Date.now() - this.dd.startTime) / 1000;
         const avgS = (elapsedS / this.dd.pages).toFixed(1);
@@ -195,7 +195,13 @@ function parseCFLine(line, display) {
 }
 
 function parseDDLine(line, display) {
-  // 每頁請求：  第 N 頁...
+  // aggregate 聚合分頁：  aggregate 第 N 頁...
+  if (/aggregate\s+第\s*\d+\s*頁/.test(line)) {
+    if (!display.dd.startTime) display.dd.startTime = Date.now();
+    display.dd.aggregatePages++;
+    return;
+  }
+  // 明細下載每頁請求：  第 N 頁...
   if (/第\s*\d+\s*頁/.test(line)) {
     if (!display.dd.startTime) display.dd.startTime = Date.now();
     display.dd.pages++;
@@ -429,6 +435,7 @@ async function main() {
       (attempt) => {
         if (attempt > 1) {
           display.dd.pages = 0;
+          display.dd.aggregatePages = 0;
           display.dd.startTime = null;
         }
         return runWithProgress(

@@ -10,6 +10,7 @@ const {
   hmLabel,
   secondLabel,
   buildTWRange,
+  buildTWWindows,
   buildUTCRange,
 } = require('../src/lib/time');
 
@@ -66,6 +67,17 @@ test('buildTWRange：回傳台灣時區當日 00:00:00 ~ 23:59:59 的 ISO 字串
     fromISO: '2026-05-08T00:00:00+08:00',
     toISO: '2026-05-08T23:59:59+08:00',
   });
+});
+
+test('buildTWWindows：依指定小時數切出台灣時區當日查詢窗', () => {
+  assert.deepEqual(buildTWWindows('20260508', 4), [
+    { fromISO: '2026-05-08T00:00:00+08:00', toISO: '2026-05-08T04:00:00+08:00', label: '00:00-04:00' },
+    { fromISO: '2026-05-08T04:00:00+08:00', toISO: '2026-05-08T08:00:00+08:00', label: '04:00-08:00' },
+    { fromISO: '2026-05-08T08:00:00+08:00', toISO: '2026-05-08T12:00:00+08:00', label: '08:00-12:00' },
+    { fromISO: '2026-05-08T12:00:00+08:00', toISO: '2026-05-08T16:00:00+08:00', label: '12:00-16:00' },
+    { fromISO: '2026-05-08T16:00:00+08:00', toISO: '2026-05-08T20:00:00+08:00', label: '16:00-20:00' },
+    { fromISO: '2026-05-08T20:00:00+08:00', toISO: '2026-05-08T23:59:59+08:00', label: '20:00-23:59' },
+  ]);
 });
 
 test('buildUTCRange：台灣時區當日對應的 UTC 範圍會落在前一天下午（-8 小時）', () => {

@@ -62,6 +62,35 @@ function buildTWRange(dateDigits) {
   };
 }
 
+// datadog-log-fetcher 用：把台灣時區當日切成固定小時數的查詢窗。
+// 窗與窗交界使用同一個整點，讓 Datadog 若採 inclusive to 也只會多抓邊界資料；404 會再用 trace_id 去重。
+function buildTWWindows(dateDigits, windowHours) {
+  if (!Number.isInteger(windowHours) || windowHours <= 0 || windowHours > 24) {
+    throw new Error(`無效的 windowHours: ${windowHours}`);
+  }
+
+  const y = dateDigits.slice(0, 4);
+  const m = dateDigits.slice(4, 6);
+  const d = dateDigits.slice(6, 8);
+  const p = (n) => String(n).padStart(2, '0');
+  const windows = [];
+
+  for (let startHour = 0; startHour < 24; startHour += windowHours) {
+    const endHour = Math.min(startHour + windowHours, 24);
+    const fromISO = `${y}-${m}-${d}T${p(startHour)}:00:00+08:00`;
+    const toISO = endHour === 24
+      ? `${y}-${m}-${d}T23:59:59+08:00`
+      : `${y}-${m}-${d}T${p(endHour)}:00:00+08:00`;
+    windows.push({
+      fromISO,
+      toISO,
+      label: `${p(startHour)}:00-${endHour === 24 ? '23:59' : `${p(endHour)}:00`}`,
+    });
+  }
+
+  return windows;
+}
+
 // cloudflare-log-fetcher 查詢範圍：台灣時區當日對應的 UTC ms 範圍
 function buildUTCRange(dateDigits) {
   const y = parseInt(dateDigits.slice(0, 4), 10);
@@ -88,5 +117,6 @@ module.exports = {
   secondLabel,
   nowTW,
   buildTWRange,
+  buildTWWindows,
   buildUTCRange,
 };
