@@ -20,5 +20,5 @@ const { main } = require('../src/datadog/fetch-datadog');
 
 main().catch((err) => {
   console.error('執行錯誤:', err.message);
-  process.exit(1);
+  process.exitCode = 1;
 });

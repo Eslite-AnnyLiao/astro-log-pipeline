@@ -141,14 +141,27 @@ class ProgressDisplay {
 // 子程序啟動（解析進度，抑制原始輸出）
 // ============================
 
+const LOG_DIR = path.join(PROJECT_ROOT, 'logs');
+
+// 子程序原始 stdout/stderr 同步寫進 log 檔（用 fd + writeSync，不是 WriteStream）：
+// 子程序若在 console.error 後立即 process.exit()，pipe 上的非同步寫入不保證會
+// flush 完就被截斷丟失；同步寫入才能確保錯誤內容真的留得下來可供事後查證。
 function runWithProgress(scriptName, scriptArgs, onLine, label) {
   return new Promise((resolve, reject) => {
     const child = spawn('node', [path.join(__dirname, scriptName), ...scriptArgs], { cwd: PROJECT_ROOT });
+
+    fs.mkdirSync(LOG_DIR, { recursive: true });
+    const logPath = path.join(LOG_DIR, `${label}-${child.pid || Date.now()}.log`);
+    const logFd = fs.openSync(logPath, 'w');
+
     let buf = '';
-    const errLines = [];
+
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
 
     child.stdout.on('data', (data) => {
-      buf += data.toString();
+      fs.writeSync(logFd, data);
+      buf += data;
       let nl;
       while ((nl = buf.indexOf('\n')) !== -1) {
         const line = buf.slice(0, nl);
@@ -157,18 +170,22 @@ function runWithProgress(scriptName, scriptArgs, onLine, label) {
       }
     });
 
-    child.stderr.on('data', (d) => errLines.push(d.toString()));
-
-    child.on('close', (code) => {
-      if (buf && onLine) onLine(buf);
-      if (errLines.length) {
-        process.stderr.write(`\n[${label} stderr]\n${errLines.join('')}\n`);
-      }
-      if (code === 0) resolve();
-      else reject(new Error(`${scriptName} exit ${code}`));
+    child.stderr.on('data', (data) => {
+      fs.writeSync(logFd, data);
     });
 
-    child.on('error', reject);
+    child.on('close', (code, signal) => {
+      if (buf && onLine) onLine(buf);
+      fs.closeSync(logFd);
+      if (code === 0) { resolve(); return; }
+      const reason = signal ? `被系統訊號中止 signal=${signal}` : `exit code=${code}`;
+      reject(new Error(`${scriptName} 失敗（${reason}），詳細輸出見 ${path.relative(PROJECT_ROOT, logPath)}`));
+    });
+
+    child.on('error', (err) => {
+      fs.closeSync(logFd);
+      reject(err);
+    });
   });
 }
 
@@ -429,7 +446,7 @@ async function main() {
       },
     )
       .then(() => { display.cf.done = true; })
-      .catch((err) => { display.cf.error = err.message.slice(0, 40); });
+      .catch((err) => { display.cf.error = err.message; });
 
     const ddPromise = retryAsync(
       (attempt) => {
@@ -453,9 +470,12 @@ async function main() {
       },
     )
       .then(() => { display.dd.done = true; })
-      .catch((err) => { display.dd.error = err.message.slice(0, 40); });
+      .catch((err) => { display.dd.error = err.message; });
 
     await Promise.all([cfPromise, ddPromise]);
+
+    if (display.cf.error) console.log(`\n  [CF] ${display.cf.error}`);
+    if (display.dd.error) console.log(`\n  [DD] ${display.dd.error}`);
 
     if (display.dd.error) {
       display.finalize();
@@ -478,9 +498,11 @@ async function main() {
     'ANALYZER',
   )
     .then(() => { display.analyzer.done = true; })
-    .catch((err) => { display.analyzer.error = err.message.slice(0, 40); });
+    .catch((err) => { display.analyzer.error = err.message; });
 
   display.finalize();
+
+  if (display.analyzer.error) console.log(`\n  [ANALYZER] ${display.analyzer.error}`);
 
   if (!display.cf.error && !display.analyzer.error) {
     console.log('');
@@ -518,4 +540,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { mergeCloudflareIntoCombined, mergeErrors404IntoCombined };
+module.exports = { mergeCloudflareIntoCombined, mergeErrors404IntoCombined, runWithProgress, LOG_DIR };
