@@ -1,5 +1,6 @@
 'use strict';
 
+const fs = require('fs');
 const { once } = require('events');
 const { csvRow } = require('../lib/csv');
 
@@ -43,6 +44,19 @@ async function writePageRows(ws, page, mapRow) {
       await once(ws, 'drain');
     }
   }
+}
+
+// 同步版本：搭配 checkpoint 續傳用。fs.writeSync 回傳時資料保證已交給 OS（不像
+// WriteStream 是非同步佇列），checkpoint 記下的 bytesWritten 才能真正對應「已確定落地」
+// 的檔案長度，中斷後才能安全地用這個長度做 ftruncate 續傳，不會截到還沒寫完的殘餘資料。
+function writePageRowsSync(fd, page, mapRow) {
+  let bytes = 0;
+  for (const log of page) {
+    const chunk = `${csvRow(...mapRow(log))}\n`;
+    fs.writeSync(fd, chunk);
+    bytes += Buffer.byteLength(chunk);
+  }
+  return bytes;
 }
 
 function extractProductId(custom) {
@@ -102,6 +116,7 @@ module.exports = {
   formatDuration,
   logsToCsv,
   writePageRows,
+  writePageRowsSync,
   ssrMapRow,
   categoryMapRow,
   extractProductId,

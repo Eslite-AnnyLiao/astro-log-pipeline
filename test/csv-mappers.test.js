@@ -3,10 +3,14 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { Writable } = require('stream');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
 const {
   formatDuration,
   logsToCsv,
   writePageRows,
+  writePageRowsSync,
   ssrMapRow,
   categoryMapRow,
   extractProductId,
@@ -73,6 +77,34 @@ test('writePageRows：write() 回傳 false 時會等 drain 才繼續寫下一行
 
   assert.deepEqual(written, ['1,x\n', '2,y\n', '3,z\n']); // 內容與順序仍然正確
   assert.ok(drainCount > 0, '應該至少觸發一次 drain，證明真的有走等待路徑，而不是把資料硬塞進 buffer');
+});
+
+test('writePageRowsSync：同步寫入 fd，內容與順序正確，且回傳的 bytes 等於實際寫入長度（checkpoint 續傳要靠這個對齊截斷點）', () => {
+  const tmpPath = path.join(os.tmpdir(), `write-sync-test-${process.pid}-${Date.now()}.csv`);
+  const fd = fs.openSync(tmpPath, 'w');
+
+  const bytes = writePageRowsSync(fd, [{ a: 1, b: 'x' }, { a: 2, b: 'y' }], (log) => [log.a, log.b]);
+  fs.closeSync(fd);
+
+  const content = fs.readFileSync(tmpPath, 'utf8');
+  assert.equal(content, '1,x\n2,y\n');
+  assert.equal(bytes, Buffer.byteLength(content));
+
+  fs.rmSync(tmpPath, { force: true });
+});
+
+test('writePageRowsSync：欄位含逗號/換行等特殊字元時仍正確跳脫，回傳 bytes 仍對得上檔案實際長度', () => {
+  const tmpPath = path.join(os.tmpdir(), `write-sync-test-special-${process.pid}-${Date.now()}.csv`);
+  const fd = fs.openSync(tmpPath, 'w');
+
+  const bytes = writePageRowsSync(fd, [{ a: 'hello, world', b: 'line1\nline2' }], (log) => [log.a, log.b]);
+  fs.closeSync(fd);
+
+  const content = fs.readFileSync(tmpPath, 'utf8');
+  assert.equal(content, '"hello, world","line1\nline2"\n');
+  assert.equal(bytes, Buffer.byteLength(content));
+
+  fs.rmSync(tmpPath, { force: true });
 });
 
 test('ssrMapRow：從 attributes.attributes 取出 user_agent/duration，缺值以空字串代替', () => {

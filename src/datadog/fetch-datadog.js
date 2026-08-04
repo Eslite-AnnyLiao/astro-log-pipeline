@@ -6,7 +6,8 @@ const path = require('path');
 
 const { normalizeDate, buildTWRange, buildTWWindows } = require('../lib/time');
 const { setDebug, fetchAllLogs, fetchAggregateCount, fetchAggregate404Counts } = require('./client');
-const { writePageRows, merge404Logs, logs404ToCsv, counts404ToCsv } = require('./csv-mappers');
+const { writePageRowsSync, merge404Logs, logs404ToCsv, counts404ToCsv } = require('./csv-mappers');
+const { loadCheckpoint, saveCheckpoint, clearCheckpoint } = require('./checkpoint');
 const PAGE_KINDS = require('../config/page-kinds');
 
 const DATADOG_API_KEY = process.env.DATADOG_API_KEY;
@@ -35,6 +36,61 @@ function parseArgs(argv) {
     else if (argv[i] === '--only-404') args.only404 = true;
   }
   return args;
+}
+
+// 抓單一 subQuery、寫檔、失敗可續傳。拆成獨立函式方便測試斷點續傳行為，不必透過 main() 的 CLI 參數解析。
+async function fetchSubQueryToFile(apiKey, appKey, sq, query, fromISO, toISO, dateDigits) {
+  // 逐頁邊抓邊寫進暫存檔，不把整批 log 留在記憶體（日下載量可能上看百萬筆）；
+  // 全部抓完才 rename 成正式檔名，中途失敗 tmp 檔會留下但正式檔名不受影響（要嘛完整、要嘛沒有）。
+  const outDir = `./to-analyze-daily-data/${sq.outputDirName}`;
+  fs.mkdirSync(outDir, { recursive: true });
+  const outPath = path.join(outDir, sq.filePattern(dateDigits));
+  const tmpPath = `${outPath}.tmp`;
+  const checkpointPath = `${tmpPath}.checkpoint.json`;
+
+  const checkpointKey = { query, fromISO, toISO, variant: sq.variant };
+  const checkpoint = loadCheckpoint(checkpointPath, checkpointKey);
+
+  // 續傳條件：checkpoint 跟本次查詢條件一致，且 tmp 檔至少涵蓋 checkpoint 記錄的長度
+  // （用同步寫入保證 bytesWritten 一定是已落地的資料，見 writePageRowsSync 註解）。
+  // tmp 檔比 checkpoint 記的還短代表狀態不可信（例如手動改過檔案），放棄續傳、全新開始。
+  let fd = null;
+  let resumeCursor = null;
+  let resumeTotal = 0;
+  if (checkpoint && fs.existsSync(tmpPath) && fs.statSync(tmpPath).size >= checkpoint.bytesWritten) {
+    // 'a'（append）模式：後續每次 writeSync 都固定寫到檔案結尾，不必自己追蹤/設定寫入位置——
+    // 若用 'r+' 開檔，fd 的寫入位置預設停在 0，ftruncate 並不會把它移到截斷點，之後寫入會從檔頭
+    // 覆蓋掉既有內容而非接續寫在後面。
+    fd = fs.openSync(tmpPath, 'a');
+    fs.ftruncateSync(fd, checkpoint.bytesWritten);
+    resumeCursor = checkpoint.cursor;
+    resumeTotal = checkpoint.total;
+    console.log(`  ↻ [${sq.variant}] 偵測到中斷的下載進度，從第 ${resumeTotal} 筆之後續傳`);
+  } else {
+    clearCheckpoint(checkpointPath);
+    fd = fs.openSync(tmpPath, 'w');
+    fs.writeSync(fd, `${sq.header}\n`);
+  }
+
+  const total = await fetchAllLogs(
+    apiKey, appKey, query, fromISO, toISO, sq.variant,
+    async (page) => { writePageRowsSync(fd, page, sq.mapRow); },
+    {
+      initialCursor: resumeCursor,
+      initialTotal: resumeTotal,
+      onCheckpoint: (nextCursor, runningTotal) => {
+        saveCheckpoint(checkpointPath, {
+          query, fromISO, toISO, variant: sq.variant,
+          cursor: nextCursor, total: runningTotal, bytesWritten: fs.fstatSync(fd).size,
+        });
+      },
+    },
+  );
+  fs.closeSync(fd);
+  clearCheckpoint(checkpointPath);
+  fs.renameSync(tmpPath, outPath);
+
+  return { outPath, total };
 }
 
 async function main() {
@@ -85,25 +141,9 @@ async function main() {
     const subQueryCounts = {};
 
     if (!args.only404) for (const sq of kind.datadog.subQueries) {
-      // 逐頁邊抓邊寫進暫存檔，不把整批 log 留在記憶體（日下載量可能上看百萬筆）；
-      // 全部抓完才 rename 成正式檔名，中途失敗 tmp 檔會留下但正式檔名不受影響（要嘛完整、要嘛沒有）。
-      const outDir = `./to-analyze-daily-data/${sq.outputDirName}`;
-      fs.mkdirSync(outDir, { recursive: true });
-      const outPath = path.join(outDir, sq.filePattern(dateDigits));
-      const tmpPath = `${outPath}.tmp`;
-      const ws = fs.createWriteStream(tmpPath, { flags: 'w' });
-      let streamError = null;
-      ws.on('error', (err) => { streamError = err; });
-      ws.write(`${sq.header}\n`);
-
-      const total = await fetchAllLogs(args.apiKey, args.appKey, sq.queryTemplate(worker), fromISO, toISO, sq.variant, async (page) => {
-        if (streamError) throw streamError;
-        await writePageRows(ws, page, sq.mapRow);
-      });
-      if (streamError) throw streamError;
-      await new Promise((resolve, reject) => ws.end((err) => (err ? reject(err) : resolve())));
-      fs.renameSync(tmpPath, outPath);
-
+      const { outPath, total } = await fetchSubQueryToFile(
+        args.apiKey, args.appKey, sq, sq.queryTemplate(worker), fromISO, toISO, dateDigits,
+      );
       subQueryCounts[sq.variant] = total;
       savedLines.push(`• ${sq.variant} : ${outPath}  (${total} 筆)`);
     }
@@ -183,4 +223,4 @@ async function main() {
   savedLines.forEach((line) => console.log(line));
 }
 
-module.exports = { main };
+module.exports = { main, fetchSubQueryToFile };
