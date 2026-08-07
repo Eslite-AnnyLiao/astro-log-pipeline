@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { loadCheckpoint, saveCheckpoint, clearCheckpoint } = require('../src/datadog/checkpoint');
+const { loadCheckpoint, saveCheckpoint, clearCheckpoint } = require('../src/lib/checkpoint');
 
 function tmpCheckpointPath() {
   return path.join(os.tmpdir(), `checkpoint-test-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.json`);
@@ -43,10 +43,22 @@ test('loadCheckpoint：JSON 損毀（例如寫到一半當機）→ null，不�
   clearCheckpoint(p);
 });
 
-test('loadCheckpoint：缺少 bytesWritten/total 或型別不對 → null', () => {
+test('loadCheckpoint：只比對 expected 有列出的欄位，其他欄位（如 bytesWritten/hourly/map）由呼叫端自行決定怎麼用', () => {
   const p = tmpCheckpointPath();
-  saveCheckpoint(p, { query: 'q', fromISO: 'f', toISO: 't', variant: 'v', cursor: 'c1' }); // 沒有 total/bytesWritten
-  assert.equal(loadCheckpoint(p, { query: 'q', fromISO: 'f', toISO: 't', variant: 'v' }), null);
+  saveCheckpoint(p, { query: 'q', fromISO: 'f', toISO: 't', variant: 'v', cursor: 'c1' }); // 沒有 total/bytesWritten 也合法
+  const result = loadCheckpoint(p, { query: 'q', fromISO: 'f', toISO: 't', variant: 'v' });
+  assert.deepEqual(result, { query: 'q', fromISO: 'f', toISO: 't', variant: 'v', cursor: 'c1' });
+  clearCheckpoint(p);
+});
+
+test('loadCheckpoint：expected 只帶部分欄位時，只比對那幾個欄位（給 CF slot / 404 window 這種 key 組合不同的用法）', () => {
+  const p = tmpCheckpointPath();
+  saveCheckpoint(p, { worker: 'w1', typeLabel: 'product', dateDigits: '20260804', nextSlotStart: 123, hourly: [] });
+  assert.deepEqual(
+    loadCheckpoint(p, { worker: 'w1', typeLabel: 'product', dateDigits: '20260804' }),
+    { worker: 'w1', typeLabel: 'product', dateDigits: '20260804', nextSlotStart: 123, hourly: [] },
+  );
+  assert.equal(loadCheckpoint(p, { worker: 'w1', typeLabel: 'category', dateDigits: '20260804' }), null);
   clearCheckpoint(p);
 });
 

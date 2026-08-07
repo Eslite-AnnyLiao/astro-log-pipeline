@@ -6,6 +6,7 @@ const path = require('path');
 
 const { normalizeDate, buildUTCRange, nowTW } = require('../lib/time');
 const { setDebug, verifyToken, fetchAllLogs } = require('./client');
+const { loadCheckpoint, saveCheckpoint, clearCheckpoint } = require('../lib/checkpoint');
 const PAGE_KINDS = require('../config/page-kinds');
 
 const CLOUDFLARE_ACCOUNT_ID = process.env.CLOUDFLARE_ACCOUNT_ID;
@@ -71,15 +72,12 @@ function buildReport(dateDigits, worker, typeLabel, totalSsrHits, totalSsgHits, 
   return lines.join('\n');
 }
 
-// 查詢並寫出單一頁面類型的結果
-async function fetchAndSave(args, dateDigits, dateDash, outputOverride, pageKindKey) {
+// 查詢並寫出單一頁面類型的結果。buildRangeFn 預設用真正的當日台灣時區範圍，測試時可以換成
+// 涵蓋範圍縮小的版本，避免一整天 6 個 slot（12 次請求）真的撞到 CF 6 req/60s 的 rate limit。
+async function fetchAndSave(args, dateDigits, dateDash, outputOverride, pageKindKey, buildRangeFn = buildUTCRange) {
   const pageKind = PAGE_KINDS[pageKindKey];
   const pathPrefix = pageKind.urlPathPrefix;
   const typeLabel = pageKind.label;
-
-  const { totalSsrHits, totalSsgHits, hourly } = await fetchAllLogs(
-    args.accountId, args.apiToken, dateDigits, args.worker, pathPrefix, typeLabel, buildUTCRange,
-  );
 
   // 預設依頁面類型分資料夾（跟 datadog-export 的結構一致），--output 明確指定時直接沿用（不分頁面類型子資料夾）
   const outDir = outputOverride || path.join('./daily-analysis-result/cloudflare', pageKindKey);
@@ -88,6 +86,23 @@ async function fetchAndSave(args, dateDigits, dateDash, outputOverride, pageKind
   const base = `cloudflare-cache-hit${pageKind.cloudflare.fileSuffix}-${dateDigits}`;
   const jsonPath = path.join(outDir, `${base}.json`);
   const txtPath = path.join(outDir, `${base}.txt`);
+  const checkpointPath = path.join(outDir, `${base}.checkpoint.json`);
+
+  const checkpointKey = { worker: args.worker || null, pathPrefix, typeLabel, dateDigits };
+  const checkpoint = loadCheckpoint(checkpointPath, checkpointKey);
+  if (!checkpoint) clearCheckpoint(checkpointPath);
+
+  const { totalSsrHits, totalSsgHits, hourly } = await fetchAllLogs(
+    args.accountId, args.apiToken, dateDigits, args.worker, pathPrefix, typeLabel, buildRangeFn,
+    {
+      initialHourly: checkpoint ? checkpoint.hourly : [],
+      initialSlotStart: checkpoint ? checkpoint.nextSlotStart : null,
+      onCheckpoint: (hourlyResults, nextSlotStart) => {
+        saveCheckpoint(checkpointPath, { ...checkpointKey, hourly: hourlyResults, nextSlotStart });
+      },
+    },
+  );
+  clearCheckpoint(checkpointPath);
 
   const jsonOutput = {
     fetched_at: new Date().toISOString(),
@@ -167,4 +182,4 @@ async function main() {
   savedLines.forEach((line) => console.log(line));
 }
 
-module.exports = { main };
+module.exports = { main, fetchAndSave };

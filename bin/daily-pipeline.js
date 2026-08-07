@@ -63,7 +63,7 @@ const CF_TOTAL_HOURS = Object.keys(PAGE_KINDS).length * 24;
 class ProgressDisplay {
   constructor() {
     this.cf = { hours: 0, hits: 0, done: false, error: null };
-    this.dd = { pages: 0, aggregatePages: 0, done: false, error: null, startTime: null };
+    this.dd = { pages: 0, aggregatePages: 0, done: false, error: null, startTime: null, stage: '' };
     this.analyzer = { state: 'waiting', done: false, error: null };
 
     this._spinIdx = 0;
@@ -108,7 +108,7 @@ class ProgressDisplay {
     } else if (this.dd.done) {
       ddInfo = `\x1b[32m✓ 完成  明細 ${this.dd.pages} 頁  聚合 ${this.dd.aggregatePages} 頁\x1b[0m`;
     } else {
-      let detail = `明細 ${this.dd.pages} 頁  聚合 ${this.dd.aggregatePages} 頁`;
+      let detail = `${this.dd.stage ? `[${this.dd.stage}]  ` : ''}明細 ${this.dd.pages} 頁  聚合 ${this.dd.aggregatePages} 頁`;
       if (this.dd.startTime && this.dd.pages >= 2) {
         const elapsedS = (Date.now() - this.dd.startTime) / 1000;
         const avgS = (elapsedS / this.dd.pages).toFixed(1);
@@ -211,7 +211,29 @@ function parseCFLine(line, display) {
   }
 }
 
+// datadog-log-fetcher.js 每個查詢區段開始時會印一行 `[label] Query: ...` 或
+// `[label] Aggregate Query: ...`（見 src/datadog/client.js），label 是 subQuery 的
+// variant（如 "product-ssr"）或 404 統計的 "404-${kindKey}"（聚合）/ "404-${kindKey} 時間窗標籤"
+// （分時間窗 fallback）。把這個 label 換成中文，讓進度顯示能標出「現在在抓哪個頁面類型的哪個部分」。
+function formatDDStage(label) {
+  const m404 = label.match(/^404-([^\s]+)(?:\s+(.+))?$/);
+  if (m404) {
+    const [, kindKey, windowLabel] = m404;
+    const kindLabel = PAGE_KINDS[kindKey]?.label || kindKey;
+    return windowLabel ? `${kindLabel} 404（${windowLabel}）` : `${kindLabel} 404 聚合查詢`;
+  }
+  for (const kindKey of Object.keys(PAGE_KINDS)) {
+    const matched = PAGE_KINDS[kindKey].datadog.subQueries.some((sq) => sq.variant === label);
+    if (matched) return `${PAGE_KINDS[kindKey].label} 明細`;
+  }
+  return label;
+}
+
 function parseDDLine(line, display) {
+  // 區段標記：  [label] Query: ... 或  [label] Aggregate Query: ...
+  const mStage = line.match(/^\[([^\]]+)\]\s+(?:Aggregate\s+)?Query:/);
+  if (mStage) display.dd.stage = formatDDStage(mStage[1]);
+
   // aggregate 聚合分頁：  aggregate 第 N 頁...
   if (/aggregate\s+第\s*\d+\s*頁/.test(line)) {
     if (!display.dd.startTime) display.dd.startTime = Date.now();
@@ -449,12 +471,11 @@ async function main() {
       .catch((err) => { display.cf.error = err.message; });
 
     const ddPromise = retryAsync(
-      (attempt) => {
-        if (attempt > 1) {
-          display.dd.pages = 0;
-          display.dd.aggregatePages = 0;
-          display.dd.startTime = null;
-        }
+      () => {
+        // 跟 CF 不同：dd.pages/aggregatePages 重試時刻意不歸零。datadog-log-fetcher.js 對已經
+        // 中斷的 subQuery 會從 checkpoint 續傳（見 src/datadog/fetch-datadog.js），如果這裡把畫面
+        // 計數器重設成 0，會讓「其實有正確接續下載」看起來像整個從頭重來，造成誤判。累計計數器
+        // 保留跨重試的總頁數，才能如實反映實際下載進度。
         return runWithProgress(
           'datadog-log-fetcher.js',
           ['--date', dateDigits, ...envFlag, ...debugFlag],
@@ -540,4 +561,7 @@ if (require.main === module) {
   });
 }
 
-module.exports = { mergeCloudflareIntoCombined, mergeErrors404IntoCombined, runWithProgress, LOG_DIR };
+module.exports = {
+  mergeCloudflareIntoCombined, mergeErrors404IntoCombined, runWithProgress, LOG_DIR,
+  parseCFLine, parseDDLine, formatDDStage,
+};

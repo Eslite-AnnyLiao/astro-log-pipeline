@@ -1,6 +1,6 @@
 'use strict';
 
-const { sleep, httpsRequest } = require('../lib/http');
+const http = require('../lib/http');
 
 const RATE_LIMIT_WINDOW_MS = 60_000;
 const RATE_LIMIT_MAX_REQUESTS = 6;
@@ -24,7 +24,7 @@ class RateLimiter {
       console.log(
         `  [Rate Limiter] 已達 ${this.maxRequests} req/${this.windowMs / 1000}s，等待 ${Math.ceil(waitMs / 1000)}s...`,
       );
-      await sleep(waitMs);
+      await http.sleep(waitMs);
       return this.throttle();
     }
 
@@ -33,6 +33,12 @@ class RateLimiter {
 }
 
 const rateLimiter = new RateLimiter(RATE_LIMIT_MAX_REQUESTS, RATE_LIMIT_WINDOW_MS);
+
+// 測試用：rateLimiter 是 module 內的單例、用真實 Date.now() 累積時間戳，同一個 process 裡
+// 連續跑多個測試會共用同一份時間戳記錄，可能誤觸發「已達上限」而真的等待。跑測試前重置它。
+function resetRateLimiterForTests() {
+  rateLimiter.timestamps = [];
+}
 let DEBUG = false;
 function setDebug(v) { DEBUG = v; }
 
@@ -41,7 +47,7 @@ async function verifyToken(accountId, apiToken) {
   const headers = { Authorization: `Bearer ${apiToken}` };
   let res;
   try {
-    res = await httpsRequest('GET', url, headers, null);
+    res = await http.httpsRequest('GET', url, headers, null);
   } catch (err) {
     throw new Error(`Token 驗證網路錯誤: ${err.message}`);
   }
@@ -75,11 +81,11 @@ async function callObservabilityAPI(accountId, apiToken, subpath, body, retries 
 
   let res;
   try {
-    res = await httpsRequest('POST', url, headers, JSON.stringify(body));
+    res = await http.httpsRequest('POST', url, headers, JSON.stringify(body));
   } catch (err) {
     if (retries < MAX_RETRIES) {
       console.log(`  [網路錯誤] ${err.message}，10s 後重試 (${retries + 1}/${MAX_RETRIES})...`);
-      await sleep(10_000);
+      await http.sleep(10_000);
       return callObservabilityAPI(accountId, apiToken, subpath, body, retries + 1);
     }
     throw err;
@@ -95,7 +101,7 @@ async function callObservabilityAPI(accountId, apiToken, subpath, body, retries 
     if (retries >= MAX_RETRIES) throw new Error('Rate limit (429) 超過最大重試次數');
     const retryAfterSec = parseInt(res.headers['retry-after'] || '60', 10);
     console.log(`  [429 Rate Limited] 等待 ${retryAfterSec}s 後重試 (${retries + 1}/${MAX_RETRIES})...`);
-    await sleep(retryAfterSec * 1000);
+    await http.sleep(retryAfterSec * 1000);
     return callObservabilityAPI(accountId, apiToken, subpath, body, retries + 1);
   }
 
@@ -145,10 +151,15 @@ async function fetchCalcCount(accountId, apiToken, filters, fromMs, toMs) {
 
 const SLOT_HOURS = 4; // 每個查詢 slot 跨幾小時（減少 API 呼叫次數）
 
-async function fetchAllLogs(accountId, apiToken, dateDigits, worker, pathPrefix, typeLabel, buildUTCRange) {
+// opts.initialHourly/initialSlotStart：從中斷處續傳用的起點，不傳就是從頭開始（跟舊行為一致）。
+// opts.onCheckpoint(hourlyResults, nextSlotStart)：每個 slot 查完才呼叫，讓呼叫端把目前累積的
+// hourly 結果跟「下一個還沒查的 slot」同步寫進 checkpoint 檔——slot 本身只有一次 count 查詢
+// （非分頁），查完即代表該 slot 已確定落地，沒有「半個 slot」的中間狀態要處理。
+async function fetchAllLogs(accountId, apiToken, dateDigits, worker, pathPrefix, typeLabel, buildUTCRange, opts = {}) {
+  const { initialHourly = [], initialSlotStart = null, onCheckpoint } = opts;
   const { fromMs, toMs, startDisplay, endDisplay } = buildUTCRange(dateDigits);
   const SLOT_MS = SLOT_HOURS * 3600_000;
-  const hourlyResults = [];
+  const hourlyResults = [...initialHourly];
 
   console.log(`查詢時間範圍 (UTC): ${startDisplay} ~ ${endDisplay}`);
   console.log(`Worker: ${worker || '（不限）'}`);
@@ -156,7 +167,8 @@ async function fetchAllLogs(accountId, apiToken, dateDigits, worker, pathPrefix,
   console.log(`Cache hit 條件: astro-ssr / astro-ssg（每 ${SLOT_HOURS} 小時並行查詢）`);
   console.log('');
 
-  let slotStart = fromMs;
+  let slotStart = initialSlotStart ?? fromMs;
+  if (initialSlotStart) console.log(`  ↻ 偵測到中斷的下載進度，從 ${twHHMM(slotStart)} (TW) 之後續傳`);
 
   while (slotStart < toMs) {
     const slotEnd = Math.min(slotStart + SLOT_MS - 1, toMs);
@@ -175,6 +187,7 @@ async function fetchAllLogs(accountId, apiToken, dateDigits, worker, pathPrefix,
     }
 
     slotStart += SLOT_MS;
+    if (onCheckpoint) onCheckpoint(hourlyResults, slotStart);
   }
 
   const totalSsrHits = hourlyResults.reduce((s, r) => s + r.ssrHitCount, 0);
@@ -190,4 +203,5 @@ module.exports = {
   buildCacheHitFilters,
   fetchCalcCount,
   fetchAllLogs,
+  resetRateLimiterForTests,
 };

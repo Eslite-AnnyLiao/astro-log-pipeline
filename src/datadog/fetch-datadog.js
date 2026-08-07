@@ -7,7 +7,7 @@ const path = require('path');
 const { normalizeDate, buildTWRange, buildTWWindows } = require('../lib/time');
 const { setDebug, fetchAllLogs, fetchAggregateCount, fetchAggregate404Counts } = require('./client');
 const { writePageRowsSync, merge404Logs, logs404ToCsv, counts404ToCsv } = require('./csv-mappers');
-const { loadCheckpoint, saveCheckpoint, clearCheckpoint } = require('./checkpoint');
+const { loadCheckpoint, saveCheckpoint, clearCheckpoint } = require('../lib/checkpoint');
 const PAGE_KINDS = require('../config/page-kinds');
 
 const DATADOG_API_KEY = process.env.DATADOG_API_KEY;
@@ -51,13 +51,33 @@ async function fetchSubQueryToFile(apiKey, appKey, sq, query, fromISO, toISO, da
   const checkpointKey = { query, fromISO, toISO, variant: sq.variant };
   const checkpoint = loadCheckpoint(checkpointPath, checkpointKey);
 
+  // 已經完整下載完成過（正式檔已存在、checkpoint 也還留著 total 紀錄，見下方成功路徑不再
+  // clearCheckpoint）：process 級重跑（例如 daily-pipeline.js 對整支子程序失敗後的重試，會
+  // 重新 spawn 一份全新 process 執行 main()）不該把這個 subQuery 從頭重抓一次。
+  if (fs.existsSync(outPath) && checkpoint && Number.isInteger(checkpoint.total)) {
+    console.log(`  ✓ [${sq.variant}] 先前已完整下載完成（${checkpoint.total} 筆），略過重抓`);
+    return { outPath, total: checkpoint.total };
+  }
+
   // 續傳條件：checkpoint 跟本次查詢條件一致，且 tmp 檔至少涵蓋 checkpoint 記錄的長度
   // （用同步寫入保證 bytesWritten 一定是已落地的資料，見 writePageRowsSync 註解）。
   // tmp 檔比 checkpoint 記的還短代表狀態不可信（例如手動改過檔案），放棄續傳、全新開始。
+  const tmpCovered = checkpoint && fs.existsSync(tmpPath) && fs.statSync(tmpPath).size >= checkpoint.bytesWritten;
+
+  if (tmpCovered && checkpoint.cursor === null) {
+    // 上一輪其實已經抓完最後一頁（fetchAllLogs 在沒有下一頁時會把 cursor 存成 null，見
+    // client.js 的 onCheckpoint(null, total)），只是還沒來得及 rename 成正式檔就中斷。
+    // cursor:null 代表「已經沒有下一頁」而不是「還沒開始」，不能再把它當 initialCursor 傳給
+    // fetchAllLogs——那樣會被當成從頭抓，把整批資料重複 append 在已經完整的 tmp 檔後面。
+    fs.renameSync(tmpPath, outPath);
+    console.log(`  ✓ [${sq.variant}] 上次已抓完最後一頁但尚未落地，直接完成（${checkpoint.total} 筆）`);
+    return { outPath, total: checkpoint.total };
+  }
+
   let fd = null;
   let resumeCursor = null;
   let resumeTotal = 0;
-  if (checkpoint && fs.existsSync(tmpPath) && fs.statSync(tmpPath).size >= checkpoint.bytesWritten) {
+  if (tmpCovered) {
     // 'a'（append）模式：後續每次 writeSync 都固定寫到檔案結尾，不必自己追蹤/設定寫入位置——
     // 若用 'r+' 開檔，fd 的寫入位置預設停在 0，ftruncate 並不會把它移到截斷點，之後寫入會從檔頭
     // 覆蓋掉既有內容而非接續寫在後面。
@@ -87,10 +107,73 @@ async function fetchSubQueryToFile(apiKey, appKey, sq, query, fromISO, toISO, da
     },
   );
   fs.closeSync(fd);
-  clearCheckpoint(checkpointPath);
   fs.renameSync(tmpPath, outPath);
+  // 不清掉 checkpoint：留著當完成紀錄（此時 checkpoint.cursor 已經是 null），供之後如果又被
+  // 重跑，能靠上面的「已完成，略過」判斷直接跳過，不用重抓。
 
   return { outPath, total };
+}
+
+// 404 streaming fallback：分時間窗查詢、每個窗口完整跑完才 checkpoint（窗口內部的分頁失敗
+// 由 fetchAllLogs 自己的 HTTP 層重試處理，這裡不做頁面級續傳——404 明細窗口資料量遠小於主要
+// log 下載，重跑一個窗口的代價可以接受，用窗口級換取實作簡單、狀態單純）。
+async function fetchWindowed404ToFile(apiKey, appKey, e, kindKey, query, dateDigits, outPath) {
+  const windowHours = e.windowHours || ERROR_404_WINDOW_HOURS;
+  const windows = buildTWWindows(dateDigits, windowHours);
+  const checkpointPath = `${outPath}.checkpoint.json`;
+  const checkpointKey = { query, dateDigits, windowHours, label: `404-${kindKey}` };
+  const checkpoint = loadCheckpoint(checkpointPath, checkpointKey);
+
+  // 已經完整下載完成過：process 級重跑不該把所有時間窗重新掃一次（見下方成功路徑不再
+  // clearCheckpoint，checkpoint 在全部窗口跑完後會留著 completedWindows === windows.length）。
+  if (fs.existsSync(outPath) && checkpoint && checkpoint.completedWindows === windows.length) {
+    const doneMap = new Map((checkpoint.map || []).map(([k, arr]) => [k, new Set(arr)]));
+    const doneRaw404Total = checkpoint.raw404Total || 0;
+    console.log(`  ✓ [404-${kindKey}] 先前已完整下載完成（共 ${doneMap.size} 個 key，掃描 ${doneRaw404Total} 筆），略過重抓`);
+    return { map: doneMap, raw404Total: doneRaw404Total };
+  }
+
+  let map = new Map();
+  let raw404Total = 0;
+  let startIndex = 0;
+  if (checkpoint && Number.isInteger(checkpoint.completedWindows) && checkpoint.completedWindows > 0 && checkpoint.completedWindows <= windows.length) {
+    map = new Map((checkpoint.map || []).map(([k, arr]) => [k, new Set(arr)]));
+    raw404Total = checkpoint.raw404Total || 0;
+    startIndex = checkpoint.completedWindows;
+    console.log(`  ↻ [404-${kindKey}] 偵測到中斷的下載進度，已完成 ${startIndex}/${windows.length} 個時間窗，從第 ${startIndex + 1} 個續傳`);
+  } else {
+    clearCheckpoint(checkpointPath);
+  }
+
+  console.log(`[404-${kindKey}] 分 ${windows.length} 段查詢（每 ${windowHours} 小時）`);
+
+  for (let i = startIndex; i < windows.length; i++) {
+    const w = windows[i];
+    console.log(`  時間窗 ${i + 1}/${windows.length}: ${w.label}`);
+    raw404Total += await fetchAllLogs(
+      apiKey,
+      appKey,
+      query,
+      w.fromISO,
+      w.toISO,
+      `404-${kindKey} ${w.label}`,
+      async (page) => {
+        merge404Logs(page, e.extractKey, map);
+      },
+    );
+    saveCheckpoint(checkpointPath, {
+      ...checkpointKey,
+      completedWindows: i + 1,
+      raw404Total,
+      map: Array.from(map.entries()).map(([k, v]) => [k, Array.from(v)]),
+    });
+  }
+
+  fs.writeFileSync(outPath, logs404ToCsv(map, e.keyLabel), 'utf8');
+  // 不清掉 checkpoint：留著當完成紀錄，供之後如果又被重跑，能靠上面的「已完成，略過」判斷
+  // 直接跳過，不用把所有時間窗重新掃一次。
+
+  return { map, raw404Total };
 }
 
 async function main() {
@@ -194,27 +277,9 @@ async function main() {
         }
       }
 
-      const map = new Map();
-      const windows = buildTWWindows(dateDigits, e.windowHours || ERROR_404_WINDOW_HOURS);
-      let raw404Total = 0;
-      console.log(`[404-${kindKey}] 分 ${windows.length} 段查詢（每 ${e.windowHours || ERROR_404_WINDOW_HOURS} 小時）`);
-
-      for (let i = 0; i < windows.length; i++) {
-        const w = windows[i];
-        console.log(`  時間窗 ${i + 1}/${windows.length}: ${w.label}`);
-        raw404Total += await fetchAllLogs(
-          args.apiKey,
-          args.appKey,
-          e.queryTemplate(worker),
-          w.fromISO,
-          w.toISO,
-          `404-${kindKey} ${w.label}`,
-          async (page) => {
-            merge404Logs(page, e.extractKey, map);
-          },
-        );
-      }
-      fs.writeFileSync(outPath, logs404ToCsv(map, e.keyLabel), 'utf8');
+      const { map, raw404Total } = await fetchWindowed404ToFile(
+        args.apiKey, args.appKey, e, kindKey, e.queryTemplate(worker), dateDigits, outPath,
+      );
       savedLines.push(`• 404(${kind.label}) : ${outPath}  (共 ${map.size} 個 key，掃描 ${raw404Total} 筆)`);
     }
   }
@@ -223,4 +288,4 @@ async function main() {
   savedLines.forEach((line) => console.log(line));
 }
 
-module.exports = { main, fetchSubQueryToFile };
+module.exports = { main, fetchSubQueryToFile, fetchWindowed404ToFile };
