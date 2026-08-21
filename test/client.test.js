@@ -70,6 +70,62 @@ test('fetchAllLogs：傳 onPage 時會等上一頁的 onPage 做完才抓下一�
   assert.deepEqual(events, ['start-1', 'end-1', 'start-2', 'end-2']);
 });
 
+test('fetchAllLogs：傳 initialCursor/initialTotal 時，第一個請求直接帶上該 cursor（續傳不重抓已完成的頁）', async (t) => {
+  const requests = [];
+  t.mock.method(http, 'httpsRequest', async (_method, _url, _headers, body) => {
+    requests.push(JSON.parse(body));
+    return makeRes([{ id: 99 }]);
+  });
+
+  const pages = [];
+  const total = await fetchAllLogs(
+    'key', 'app', 'query', 'from', 'to', 'label',
+    async (page) => { pages.push(page); },
+    { initialCursor: 'resume-cursor', initialTotal: 50 },
+  );
+
+  assert.equal(requests[0].page.cursor, 'resume-cursor');
+  assert.equal(total, 51); // 50（續傳前累計）+ 1（這頁）
+  assert.deepEqual(pages, [[{ id: 99 }]]);
+});
+
+test('fetchAllLogs：每頁的 onPage 做完後才呼叫 onCheckpoint，並帶上「下一頁」的 cursor 與累計總數', async (t) => {
+  let call = 0;
+  t.mock.method(http, 'httpsRequest', async () => {
+    call++;
+    if (call === 1) return makeRes([{ id: 1 }, { id: 2 }], 'cursor-1');
+    return makeRes([{ id: 3 }]);
+  });
+
+  const events = [];
+  await fetchAllLogs(
+    'key', 'app', 'query', 'from', 'to', 'label',
+    async (page) => { events.push(`onPage:${page.map((p) => p.id).join(',')}`); },
+    { onCheckpoint: (cursor, total) => events.push(`checkpoint:${cursor}:${total}`) },
+  );
+
+  assert.deepEqual(events, [
+    'onPage:1,2',
+    'checkpoint:cursor-1:2',
+    'onPage:3',
+    'checkpoint:null:3', // 最後一頁沒有 nextCursor，正規化成 null（不是 undefined，才不會在 JSON.stringify 時被整個省略掉）
+  ]);
+});
+
+test('fetchAllLogs：不傳 opts 時行為與過去一致（第一頁不帶 cursor、不呼叫 onCheckpoint 也不出錯）', async (t) => {
+  const requests = [];
+  t.mock.method(http, 'httpsRequest', async (_method, _url, _headers, body) => {
+    requests.push(JSON.parse(body));
+    return requests.length === 1 ? makeRes([{ id: 1 }], 'cursor-1') : makeRes([{ id: 2 }]);
+  });
+
+  const total = await fetchAllLogs('key', 'app', 'query', 'from', 'to', 'label', async () => {});
+
+  assert.equal(requests[0].page.cursor, undefined); // 第一頁不該帶 cursor
+  assert.equal(requests[1].page.cursor, 'cursor-1'); // 第二頁沿用上一頁回傳的 cursor
+  assert.equal(total, 2);
+});
+
 test('fetchAggregate404Counts：用 group_by + cardinality 查 404 統計，並用 cursor 拉下一頁', async (t) => {
   const requests = [];
   t.mock.method(http, 'httpsRequest', async (_method, _url, _headers, body) => {

@@ -16,5 +16,5 @@ const { main } = require('../src/analyzer/analyze');
 
 main().catch((err) => {
   console.error('執行錯誤:', err.message);
-  process.exit(1);
+  process.exitCode = 1;
 });

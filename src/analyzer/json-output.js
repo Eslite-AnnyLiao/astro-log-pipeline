@@ -1,11 +1,10 @@
 'use strict';
 
-const { toTW } = require('../lib/time');
 const { calcHourlyRenderStats } = require('./aggregate');
 
 function buildJsonOutput(variantConfig, inputFile, records, agg, computed) {
   const { renderStats, minStats, peakUA, slowHM, hf, uaStats, urlStats } = computed;
-  const { minuteCount, hourCount, slowItems } = agg;
+  const { minuteCount, hourCount } = agg;
   const hasRenderTimeline = variantConfig.hasRenderTimeline;
 
   const avgPerHour = Object.keys(hourCount).length
@@ -117,15 +116,6 @@ function buildJsonOutput(variantConfig, inputFile, records, agg, computed) {
     minutely_request_data: minuteCount,
 
     hourly_render_time_stats: hasRenderTimeline ? calcHourlyRenderStats(agg.renderItems) : undefined,
-
-    slow_render_periods: hasRenderTimeline
-      ? slowItems.map((r) => ({
-        timestamp_taiwan: toTW(r.date),
-        render_time_ms: r.ms,
-        url: r.url || null,
-        user_agent: r.ua,
-      }))
-      : undefined,
 
     chart_data: Object.entries(hourCount)
       .sort((a, b) => a[0].localeCompare(b[0]))

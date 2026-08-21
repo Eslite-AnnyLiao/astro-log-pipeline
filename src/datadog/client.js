@@ -159,13 +159,19 @@ async function throttleByRateLimit(headers) {
 // onPage 為 optional callback：傳了就每頁呼叫 onPage(data) 而不在記憶體中累積整批 log
 // （給量體可能上看百萬筆的查詢用，避免整批常駐記憶體導致 OOM），回傳總筆數而非陣列。
 // 不傳 onPage 時行為與過去一致：回傳累積好的完整 log 陣列，供小量查詢或測試使用。
-async function fetchAllLogs(apiKey, appKey, query, fromISO, toISO, label, onPage) {
+//
+// opts.initialCursor/initialTotal：從中斷處續傳用，不傳就是從頭開始（跟舊行為一致）。
+// opts.onCheckpoint(nextCursor, total)：每頁的 onPage 確定執行完（資料已落地）之後才呼叫，
+// 讓呼叫端把「續傳用的下一頁 cursor」同步寫進 checkpoint 檔——順序保證是「先落地資料，才記錄
+// 進度」，就算這支程式在呼叫途中被中斷，checkpoint 也不會記到比實際已寫資料更前面的進度。
+async function fetchAllLogs(apiKey, appKey, query, fromISO, toISO, label, onPage, opts = {}) {
+  const { initialCursor = null, initialTotal = 0, onCheckpoint } = opts;
   console.log(`[${label}] Query: ${query}`);
 
   const allLogs = onPage ? null : [];
-  let cursor = null;
-  let page = 1;
-  let total = 0;
+  let cursor = initialCursor;
+  let page = initialCursor ? Math.floor(initialTotal / PAGE_LIMIT) + 1 : 1;
+  let total = initialTotal;
   let firstLogPrinted = false;
 
   while (true) {
@@ -194,7 +200,8 @@ async function fetchAllLogs(apiKey, appKey, query, fromISO, toISO, label, onPage
     total += data.length;
     console.log(` ${data.length} 筆（累計 ${total}）`);
 
-    const nextCursor = result.meta?.page?.after;
+    const nextCursor = result.meta?.page?.after ?? null;
+    if (onCheckpoint) onCheckpoint(nextCursor, total);
     if (!nextCursor || data.length === 0) break;
 
     cursor = nextCursor;
