@@ -3,7 +3,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const http = require('../src/lib/http');
-const { fetchAllLogs, fetchAggregate404Counts } = require('../src/datadog/client');
+const { setDebug, fetchAllLogs, fetchAggregate404Counts } = require('../src/datadog/client');
 
 // x-ratelimit-remaining > 0 讓 throttleByRateLimit 走 300ms 的短分支，測試才不會被拖慢
 function makeRes(data, cursor) {
@@ -198,6 +198,26 @@ test('fetchAggregate404Counts：bucket 有資料但缺 c1 時丟錯，避免 car
     }, 'from', 'to', '404-product'),
     /沒有回傳 cardinality compute c1/,
   );
+});
+
+test('--debug 模式下 DD-API-KEY/DD-APPLICATION-KEY 不會明文印到 console（logs/*.log 會落地保存，避免金鑰外洩）', async (t) => {
+  const rawApiKey = 'abcd1234567890efghijk';
+  const rawAppKey = 'zzzz9999888877776666xy';
+
+  t.mock.method(http, 'httpsRequest', async () => makeRes([{ id: 1 }]));
+  const logCalls = [];
+  t.mock.method(console, 'log', (...args) => { logCalls.push(args.join(' ')); });
+
+  setDebug(true);
+  t.after(() => setDebug(false));
+
+  await fetchAllLogs(rawApiKey, rawAppKey, 'query', 'from', 'to', 'label', async () => {});
+
+  const output = logCalls.join('\n');
+  assert.equal(output.includes(rawApiKey), false, 'DD-API-KEY 明文不該出現在 debug log');
+  assert.equal(output.includes(rawAppKey), false, 'DD-APPLICATION-KEY 明文不該出現在 debug log');
+  assert.match(output, /DD-API-KEY.*\*\*\*/);
+  assert.match(output, /DD-APPLICATION-KEY.*\*\*\*/);
 });
 
 test('fetchAggregate404Counts：Datadog bucket paging 上限錯誤會帶 code，供 fetcher fallback', async (t) => {

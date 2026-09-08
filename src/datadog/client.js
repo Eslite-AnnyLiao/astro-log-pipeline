@@ -11,13 +11,27 @@ const MAX_RETRIES = 3;
 let DEBUG = false;
 function setDebug(v) { DEBUG = v; }
 
+// debug log 會被 daily-pipeline.js 落地存進 logs/*.log，key/auth 類 header 一律遮罩，
+// 避免 API Key 明文留在檔案裡（見 bin/daily-pipeline.js 的 stdout 落地邏輯）
+function maskHeaders(headers) {
+  const masked = {};
+  for (const [key, value] of Object.entries(headers)) {
+    if (/key|auth|token/i.test(key) && typeof value === 'string') {
+      masked[key] = value.length > 8 ? `${value.slice(0, 4)}***${value.slice(-4)}` : '***';
+    } else {
+      masked[key] = value;
+    }
+  }
+  return masked;
+}
+
 async function fetchLogsPage(apiKey, appKey, params, retries = 0) {
   const url = `https://${DATADOG_SITE}/api/v2/logs/events/search`;
   const headers = { 'DD-API-KEY': apiKey, 'DD-APPLICATION-KEY': appKey };
 
   if (DEBUG) {
     console.log(`\n[DEBUG] POST ${url}`);
-    console.log('[DEBUG] headers:', JSON.stringify(headers));
+    console.log('[DEBUG] headers:', JSON.stringify(maskHeaders(headers)));
     console.log('[DEBUG] Request body:');
     console.log(JSON.stringify(params, null, 2));
   }
@@ -77,7 +91,7 @@ async function fetchAggregatePage(apiKey, appKey, params, retries = 0) {
 
   if (DEBUG) {
     console.log(`\n[DEBUG] POST ${url}`);
-    console.log('[DEBUG] headers:', JSON.stringify(headers));
+    console.log('[DEBUG] headers:', JSON.stringify(maskHeaders(headers)));
     console.log('[DEBUG] Request body:');
     console.log(JSON.stringify(params, null, 2));
   }
