@@ -5,7 +5,7 @@ const fs = require('fs');
 const path = require('path');
 
 const { normalizeDate, buildUTCRange, nowTW } = require('../lib/time');
-const { setDebug, verifyToken, fetchAllLogs } = require('./client');
+const { setDebug, verifyToken, fetchRoutingTargetLogs, fetchCacheHitLogs } = require('./client');
 const { loadCheckpoint, saveCheckpoint, clearCheckpoint } = require('../lib/checkpoint');
 const PAGE_KINDS = require('../config/page-kinds');
 
@@ -45,27 +45,40 @@ function parseArgs(argv) {
   return args;
 }
 
-function buildReport(dateDigits, worker, typeLabel, totalSsrHits, totalSsgHits, hourly) {
+// total_ssr_hits 這裡指的是「Routing target for X: astro-ssr」總數（不分 cache hit/miss），
+// 不是真正的 cache hit 數——真正的 SSR cache hit 數要在合併進 combined JSON 時，
+// 拿這個總數減掉 ssr_records 才能算出來（見 daily-pipeline.js 的 mergeCloudflareIntoCombined）。
+function buildReport(dateDigits, worker, typeLabel, routingTargetSsrTotal, totalSsgHits, routingHourly, ssgHourly) {
   const dateDash = `${dateDigits.slice(0, 4)}-${dateDigits.slice(4, 6)}-${dateDigits.slice(6, 8)}`;
   const lines = [
-    'Cloudflare Workers Observability - Astro Cache Hit 統計',
+    'Cloudflare Workers Observability - Astro Routing/Cache Hit 統計',
     `生成時間: ${nowTW()}`,
     `日期 (台灣時區): ${dateDash} 00:00:00 ~ 23:59:59`,
     `Worker: ${worker || '（不限）'}`,
     `頁面類型: ${typeLabel}`,
-    `全天 Cache hit  SSR: ${totalSsrHits} 次  SSG: ${totalSsgHits} 次  合計: ${totalSsrHits + totalSsgHits} 次`,
+    `全天 Routing target astro-ssr 總數（不分 hit/miss）: ${routingTargetSsrTotal} 次`,
+    `全天 Astro cache hit astro-ssg: ${totalSsgHits} 次`,
     '='.repeat(64),
     '',
-    '每小時明細 (台灣時區，只顯示有資料的小時):',
-    `${'時段'.padEnd(14)}${'ssr'.padStart(6)}${'ssg'.padStart(6)}`,
-    '-'.repeat(26),
+    '每小時 Routing target astro-ssr 明細 (台灣時區，只顯示有資料的小時):',
+    `${'時段'.padEnd(14)}${'count'.padStart(8)}`,
+    '-'.repeat(22),
   ];
 
-  if (hourly.length === 0) {
+  if (routingHourly.length === 0) {
     lines.push('• 無資料');
   } else {
-    hourly.forEach(({ hour, ssrHitCount, ssgHitCount }) => {
-      lines.push(`${hour.padEnd(14)}${String(ssrHitCount).padStart(6)}${String(ssgHitCount).padStart(6)}`);
+    routingHourly.forEach(({ hour, routingCount }) => {
+      lines.push(`${hour.padEnd(14)}${String(routingCount).padStart(8)}`);
+    });
+  }
+
+  if (ssgHourly.length > 0) {
+    lines.push('', '每小時 Astro cache hit astro-ssg 明細 (台灣時區，只顯示有資料的小時):');
+    lines.push(`${'時段'.padEnd(14)}${'count'.padStart(8)}`);
+    lines.push('-'.repeat(22));
+    ssgHourly.forEach(({ hour, hitCount }) => {
+      lines.push(`${hour.padEnd(14)}${String(hitCount).padStart(8)}`);
     });
   }
 
@@ -92,16 +105,37 @@ async function fetchAndSave(args, dateDigits, dateDash, outputOverride, pageKind
   const checkpoint = loadCheckpoint(checkpointPath, checkpointKey);
   if (!checkpoint) clearCheckpoint(checkpointPath);
 
-  const { totalSsrHits, totalSsgHits, hourly } = await fetchAllLogs(
+  // Routing target 跟 SSG cache-hit 是兩條獨立的查詢/續傳進度，各自的 slot 進度分開存在
+  // checkpoint 檔的 routingSsr / ssg 底下，互不影響——其中一條中斷重跑，不會連累另一條重查。
+  function saveProgress(partial) {
+    const current = loadCheckpoint(checkpointPath, checkpointKey) || { ...checkpointKey };
+    saveCheckpoint(checkpointPath, { ...current, ...partial });
+  }
+
+  const { totalRoutingCount, hourly: routingHourly } = await fetchRoutingTargetLogs(
     args.accountId, args.apiToken, dateDigits, args.worker, pathPrefix, typeLabel, buildRangeFn,
     {
-      initialHourly: checkpoint ? checkpoint.hourly : [],
-      initialSlotStart: checkpoint ? checkpoint.nextSlotStart : null,
-      onCheckpoint: (hourlyResults, nextSlotStart) => {
-        saveCheckpoint(checkpointPath, { ...checkpointKey, hourly: hourlyResults, nextSlotStart });
-      },
+      initialHourly: checkpoint?.routingSsr?.hourly || [],
+      initialSlotStart: checkpoint?.routingSsr?.nextSlotStart ?? null,
+      onCheckpoint: (hourlyResults, nextSlotStart) => saveProgress({ routingSsr: { hourly: hourlyResults, nextSlotStart } }),
     },
   );
+
+  let totalSsgHits = 0;
+  let ssgHourly = [];
+  if (pageKind.cloudflare.hasSsg) {
+    const ssgResult = await fetchCacheHitLogs(
+      args.accountId, args.apiToken, dateDigits, args.worker, pathPrefix, typeLabel, 'astro-ssg', buildRangeFn,
+      {
+        initialHourly: checkpoint?.ssg?.hourly || [],
+        initialSlotStart: checkpoint?.ssg?.nextSlotStart ?? null,
+        onCheckpoint: (hourlyResults, nextSlotStart) => saveProgress({ ssg: { hourly: hourlyResults, nextSlotStart } }),
+      },
+    );
+    totalSsgHits = ssgResult.totalHits;
+    ssgHourly = ssgResult.hourly;
+  }
+
   clearCheckpoint(checkpointPath);
 
   const jsonOutput = {
@@ -110,13 +144,15 @@ async function fetchAndSave(args, dateDigits, dateDash, outputOverride, pageKind
     date_tw: dateDash,
     worker: args.worker || null,
     type: pageKindKey,
-    total_ssr_hits: totalSsrHits,
+    // 不是 cache hit 數，是路由決策當下的總流量（含 hit+miss）。真正的 SSR cache hit 數
+    // 要等合併進 combined JSON、拿這個總數減掉 ssr_records 才算得出來。
+    routing_target_ssr_total: totalRoutingCount,
     total_ssg_hits: totalSsgHits,
-    total_hits: totalSsrHits + totalSsgHits,
-    hourly,
+    hourly_routing_target_ssr: routingHourly,
+    hourly_ssg_hits: ssgHourly,
   };
   fs.writeFileSync(jsonPath, JSON.stringify(jsonOutput, null, 2), 'utf8');
-  fs.writeFileSync(txtPath, buildReport(dateDigits, args.worker, typeLabel, totalSsrHits, totalSsgHits, hourly), 'utf8');
+  fs.writeFileSync(txtPath, buildReport(dateDigits, args.worker, typeLabel, totalRoutingCount, totalSsgHits, routingHourly, ssgHourly), 'utf8');
 
   return { jsonPath, txtPath };
 }

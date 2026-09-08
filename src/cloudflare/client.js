@@ -135,6 +135,18 @@ function buildCacheHitFilters(worker, cacheType, pathPrefix) {
   return filters;
 }
 
+// 2026-09-07 16:45 後，商品頁/分類頁的 SSR 快取搬進 Astro Worker Cache，
+// 上面的 "Astro cache hit for X: astro-ssr" log 不再可靠（www-eslite-com 這層不再記錄到）。
+// 改用路由決策當下就會印的 "Routing target for X: astro-ssr" log 取得「總流量」
+// （不分 cache hit/miss，只要被路由到 SSR 就會印），再用 (這個總數 - 現有 ssr_records)
+// 反推 SSR cache hit 數。SSG 的 cache-hit log 沒受影響，不用改。
+function buildRoutingTargetFilters(worker, routingTarget, pathPrefix) {
+  const filters = [{ kind: 'filter', key: 'message', operation: 'regex', type: 'string', value: `^Routing target for .+: ${routingTarget}$` }];
+  if (worker) filters.push({ kind: 'filter', key: '$metadata.service', operation: 'eq', type: 'string', value: worker });
+  if (pathPrefix) filters.push({ kind: 'filter', key: '$workers.event.request.path', operation: 'regex', type: 'string', value: `^${pathPrefix}` });
+  return filters;
+}
+
 const twHHMM = (ms) => new Date(ms + 8 * 3600_000).toISOString().slice(11, 16);
 
 async function fetchCalcCount(accountId, apiToken, filters, fromMs, toMs) {
@@ -151,11 +163,12 @@ async function fetchCalcCount(accountId, apiToken, filters, fromMs, toMs) {
 
 const SLOT_HOURS = 4; // 每個查詢 slot 跨幾小時（減少 API 呼叫次數）
 
-// opts.initialHourly/initialSlotStart：從中斷處續傳用的起點，不傳就是從頭開始（跟舊行為一致）。
+// 查單一種訊息在每個時間 slot 的 count，逐 slot 累加、支援中斷續傳。
+// opts.initialHourly/initialSlotStart：從中斷處續傳用的起點，不傳就是從頭開始。
 // opts.onCheckpoint(hourlyResults, nextSlotStart)：每個 slot 查完才呼叫，讓呼叫端把目前累積的
 // hourly 結果跟「下一個還沒查的 slot」同步寫進 checkpoint 檔——slot 本身只有一次 count 查詢
 // （非分頁），查完即代表該 slot 已確定落地，沒有「半個 slot」的中間狀態要處理。
-async function fetchAllLogs(accountId, apiToken, dateDigits, worker, pathPrefix, typeLabel, buildUTCRange, opts = {}) {
+async function fetchSingleTypeLogs(accountId, apiToken, dateDigits, worker, pathPrefix, typeLabel, buildUTCRange, buildFilters, conditionLabel, opts = {}) {
   const { initialHourly = [], initialSlotStart = null, onCheckpoint } = opts;
   const { fromMs, toMs, startDisplay, endDisplay } = buildUTCRange(dateDigits);
   const SLOT_MS = SLOT_HOURS * 3600_000;
@@ -164,7 +177,7 @@ async function fetchAllLogs(accountId, apiToken, dateDigits, worker, pathPrefix,
   console.log(`查詢時間範圍 (UTC): ${startDisplay} ~ ${endDisplay}`);
   console.log(`Worker: ${worker || '（不限）'}`);
   console.log(`頁面類型: ${typeLabel}`);
-  console.log(`Cache hit 條件: astro-ssr / astro-ssg（每 ${SLOT_HOURS} 小時並行查詢）`);
+  console.log(`查詢條件: ${conditionLabel}（每 ${SLOT_HOURS} 小時查詢）`);
   console.log('');
 
   let slotStart = initialSlotStart ?? fromMs;
@@ -175,25 +188,65 @@ async function fetchAllLogs(accountId, apiToken, dateDigits, worker, pathPrefix,
     const label = `${twHHMM(slotStart)}~${twHHMM(slotEnd)} (TW)`;
     process.stdout.write(`  ${label} `);
 
-    const [ssrCount, ssgCount] = await Promise.all([
-      fetchCalcCount(accountId, apiToken, buildCacheHitFilters(worker, 'astro-ssr', pathPrefix), slotStart, slotEnd),
-      fetchCalcCount(accountId, apiToken, buildCacheHitFilters(worker, 'astro-ssg', pathPrefix), slotStart, slotEnd),
-    ]);
+    const count = await fetchCalcCount(accountId, apiToken, buildFilters(worker, pathPrefix), slotStart, slotEnd);
+    console.log(`count=${count}`);
 
-    console.log(`ssr=${ssrCount} ssg=${ssgCount}`);
-
-    if (ssrCount > 0 || ssgCount > 0) {
-      hourlyResults.push({ hour: twHHMM(slotStart), ssrHitCount: ssrCount, ssgHitCount: ssgCount });
-    }
+    if (count > 0) hourlyResults.push({ hour: twHHMM(slotStart), count });
 
     slotStart += SLOT_MS;
     if (onCheckpoint) onCheckpoint(hourlyResults, slotStart);
   }
 
-  const totalSsrHits = hourlyResults.reduce((s, r) => s + r.ssrHitCount, 0);
-  const totalSsgHits = hourlyResults.reduce((s, r) => s + r.ssgHitCount, 0);
-  console.log(`\nAstro cache hit  SSR: ${totalSsrHits} 次  SSG: ${totalSsgHits} 次\n`);
-  return { totalSsrHits, totalSsgHits, hourly: hourlyResults };
+  const total = hourlyResults.reduce((s, r) => s + r.count, 0);
+  console.log(`\n${conditionLabel}: ${total} 次\n`);
+  return { total, hourly: hourlyResults };
+}
+
+// 2026-09-07 16:45 後，商品頁/分類頁的 SSR 快取搬進 Astro Worker Cache，
+// "Astro cache hit for X: astro-ssr" log 不再可靠。改用路由決策當下就會印的
+// "Routing target for X: astro-ssr" log 取得「總流量」（不分 cache hit/miss，只要被
+// 路由到 SSR 就會印），再用 (這個總數 - 現有 ssr_records) 反推 SSR cache hit 數。
+async function fetchRoutingTargetLogs(accountId, apiToken, dateDigits, worker, pathPrefix, typeLabel, buildUTCRange, opts = {}) {
+  const initialHourly = (opts.initialHourly || []).map((h) => ({ hour: h.hour, count: h.routingCount }));
+  const { total, hourly } = await fetchSingleTypeLogs(
+    accountId, apiToken, dateDigits, worker, pathPrefix, typeLabel, buildUTCRange,
+    (w, p) => buildRoutingTargetFilters(w, 'astro-ssr', p),
+    'Routing target astro-ssr',
+    {
+      ...opts,
+      initialHourly,
+      onCheckpoint: opts.onCheckpoint
+        ? (h, nextSlotStart) => opts.onCheckpoint(h.map((x) => ({ hour: x.hour, routingCount: x.count })), nextSlotStart)
+        : undefined,
+    },
+  );
+  return {
+    totalRoutingCount: total,
+    hourly: hourly.map((h) => ({ hour: h.hour, routingCount: h.count })),
+  };
+}
+
+// SSG 的 cache-hit log 沒受 Astro Worker Cache 搬遷影響，維持查 "Astro cache hit for X: astro-ssg"，
+// 只是不再跟 astro-ssr 綁在同一次查詢裡（astro-ssr 那半已經沒人要用，省下來的 API 呼叫額度
+// 對本來就不穩定的下載有幫助）。
+async function fetchCacheHitLogs(accountId, apiToken, dateDigits, worker, pathPrefix, typeLabel, cacheType, buildUTCRange, opts = {}) {
+  const initialHourly = (opts.initialHourly || []).map((h) => ({ hour: h.hour, count: h.hitCount }));
+  const { total, hourly } = await fetchSingleTypeLogs(
+    accountId, apiToken, dateDigits, worker, pathPrefix, typeLabel, buildUTCRange,
+    (w, p) => buildCacheHitFilters(w, cacheType, p),
+    `Astro cache hit ${cacheType}`,
+    {
+      ...opts,
+      initialHourly,
+      onCheckpoint: opts.onCheckpoint
+        ? (h, nextSlotStart) => opts.onCheckpoint(h.map((x) => ({ hour: x.hour, hitCount: x.count })), nextSlotStart)
+        : undefined,
+    },
+  );
+  return {
+    totalHits: total,
+    hourly: hourly.map((h) => ({ hour: h.hour, hitCount: h.count })),
+  };
 }
 
 module.exports = {
@@ -201,7 +254,9 @@ module.exports = {
   verifyToken,
   callObservabilityAPI,
   buildCacheHitFilters,
+  buildRoutingTargetFilters,
   fetchCalcCount,
-  fetchAllLogs,
+  fetchRoutingTargetLogs,
+  fetchCacheHitLogs,
   resetRateLimiterForTests,
 };

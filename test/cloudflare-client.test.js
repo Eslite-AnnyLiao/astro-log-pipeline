@@ -3,7 +3,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const http = require('../src/lib/http');
-const { fetchAllLogs, resetRateLimiterForTests } = require('../src/cloudflare/client');
+const { fetchRoutingTargetLogs, fetchCacheHitLogs, resetRateLimiterForTests } = require('../src/cloudflare/client');
 
 const SLOT_MS = 4 * 3600_000; // 跟 client.js 內部 SLOT_HOURS=4 一致，測試用兩個 slot 的小範圍
 
@@ -20,71 +20,106 @@ function makeCfSuccess(value) {
   };
 }
 
-// 用請求內容（timeframe.from + filter 是 ssr 還是 ssg）判斷回什麼值，不依賴呼叫順序——
-// ssr/ssg 是用 Promise.all 平行送出的，順序不保證。
-function mockBySlotAndType(countsBySlotFrom) {
+function mockRoutingTargetBySlot(countsBySlotFrom) {
   return async (_method, _url, _headers, body) => {
     const parsed = JSON.parse(body);
     const from = parsed.timeframe.from;
-    const isSSR = parsed.parameters.filters.some((f) => String(f.value).includes('astro-ssr'));
-    const slot = countsBySlotFrom[from];
-    return makeCfSuccess(isSSR ? slot.ssr : slot.ssg);
+    const isRoutingTarget = parsed.parameters.filters.some((f) => String(f.value).startsWith('^Routing target for'));
+    assert.ok(isRoutingTarget, 'fetchRoutingTargetLogs 應該查 Routing target 訊息，不是 Astro cache hit');
+    return makeCfSuccess(countsBySlotFrom[from]);
   };
 }
 
-test('fetchAllLogs：不傳 opts 時行為與過去一致，兩個 slot 都查、結果正確加總', async (t) => {
+test('fetchRoutingTargetLogs：不傳 opts 時兩個 slot 都查、結果正確加總', async (t) => {
   resetRateLimiterForTests();
-  t.mock.method(http, 'httpsRequest', mockBySlotAndType({
-    0: { ssr: 1, ssg: 2 },
-    [SLOT_MS]: { ssr: 3, ssg: 4 },
+  t.mock.method(http, 'httpsRequest', mockRoutingTargetBySlot({
+    0: 10,
+    [SLOT_MS]: 20,
   }));
 
-  const { totalSsrHits, totalSsgHits, hourly } = await fetchAllLogs(
-    'acc', 'token', '20260804', 'worker', '/product/', '商品頁', twoSlotRange,
+  const { totalRoutingCount, hourly } = await fetchRoutingTargetLogs(
+    'acc', 'token', '20260908', 'worker', '/product/', '商品頁', twoSlotRange,
   );
 
-  assert.equal(totalSsrHits, 4);
-  assert.equal(totalSsgHits, 6);
+  assert.equal(totalRoutingCount, 30);
   assert.equal(hourly.length, 2);
 });
 
-test('fetchAllLogs：傳 initialHourly/initialSlotStart 時，從指定 slot 續傳，不重查已完成的 slot', async (t) => {
+test('fetchRoutingTargetLogs：傳 initialHourly/initialSlotStart 時，從指定 slot 續傳，不重查已完成的 slot', async (t) => {
   resetRateLimiterForTests();
   const requests = [];
   t.mock.method(http, 'httpsRequest', async (_method, _url, _headers, body) => {
     requests.push(JSON.parse(body));
-    return mockBySlotAndType({ [SLOT_MS]: { ssr: 3, ssg: 1 } })('POST', '', {}, body);
+    return mockRoutingTargetBySlot({ [SLOT_MS]: 7 })('POST', '', {}, body);
   });
 
-  const { totalSsrHits, totalSsgHits, hourly } = await fetchAllLogs(
-    'acc', 'token', '20260804', 'worker', '/product/', '商品頁', twoSlotRange,
-    { initialHourly: [{ hour: '00:00', ssrHitCount: 5, ssgHitCount: 2 }], initialSlotStart: SLOT_MS },
+  const { totalRoutingCount, hourly } = await fetchRoutingTargetLogs(
+    'acc', 'token', '20260908', 'worker', '/product/', '商品頁', twoSlotRange,
+    { initialHourly: [{ hour: '00:00', routingCount: 5 }], initialSlotStart: SLOT_MS },
   );
 
-  // 只該查第 2 個 slot（from = SLOT_MS），第 1 個 slot（from = 0）不該再被打
   assert.ok(requests.every((r) => r.timeframe.from === SLOT_MS), '不該重查第 1 個 slot');
-  assert.equal(requests.length, 2); // 第 2 個 slot 的 ssr + ssg 兩次查詢
+  assert.equal(requests.length, 1); // 續傳只查第 2 個 slot，單一類型不用查兩次
 
-  assert.equal(totalSsrHits, 5 + 3);
-  assert.equal(totalSsgHits, 2 + 1);
-  assert.equal(hourly.length, 2); // 續傳帶進來的 1 筆 + 這次查到的 1 筆
+  assert.equal(totalRoutingCount, 5 + 7);
+  assert.equal(hourly.length, 2);
 });
 
-test('fetchAllLogs：每個 slot 查完就呼叫 onCheckpoint，帶上目前累積結果與下一個待查 slot 的起點', async (t) => {
+function mockCacheHitBySlot(countsBySlotFrom) {
+  return async (_method, _url, _headers, body) => {
+    const parsed = JSON.parse(body);
+    const from = parsed.timeframe.from;
+    const isCacheHit = parsed.parameters.filters.some((f) => String(f.value).startsWith('^Astro cache hit for'));
+    assert.ok(isCacheHit, 'fetchCacheHitLogs 應該查 Astro cache hit 訊息，不是 Routing target');
+    return makeCfSuccess(countsBySlotFrom[from]);
+  };
+}
+
+test('fetchCacheHitLogs：不傳 opts 時兩個 slot 都查、結果正確加總（只查傳入的 cacheType）', async (t) => {
   resetRateLimiterForTests();
-  t.mock.method(http, 'httpsRequest', mockBySlotAndType({
-    0: { ssr: 1, ssg: 0 },
-    [SLOT_MS]: { ssr: 0, ssg: 2 },
+  t.mock.method(http, 'httpsRequest', mockCacheHitBySlot({
+    0: 4,
+    [SLOT_MS]: 6,
   }));
 
-  const checkpoints = [];
-  await fetchAllLogs(
-    'acc', 'token', '20260804', 'worker', '/product/', '商品頁', twoSlotRange,
-    { onCheckpoint: (hourly, nextSlotStart) => checkpoints.push({ n: hourly.length, nextSlotStart }) },
+  const { totalHits, hourly } = await fetchCacheHitLogs(
+    'acc', 'token', '20260804', 'worker', '/product/', '商品頁', 'astro-ssg', twoSlotRange,
   );
 
-  assert.deepEqual(checkpoints, [
-    { n: 1, nextSlotStart: SLOT_MS },
-    { n: 2, nextSlotStart: 2 * SLOT_MS },
-  ]);
+  assert.equal(totalHits, 10);
+  assert.equal(hourly.length, 2);
+});
+
+test('fetchCacheHitLogs：只送一次 API 呼叫每 slot（不像舊版 fetchAllLogs 那樣連帶查 astro-ssr）', async (t) => {
+  resetRateLimiterForTests();
+  const requests = [];
+  t.mock.method(http, 'httpsRequest', async (_method, _url, _headers, body) => {
+    requests.push(JSON.parse(body));
+    return mockCacheHitBySlot({ 0: 1, [SLOT_MS]: 1 })('POST', '', {}, body);
+  });
+
+  await fetchCacheHitLogs('acc', 'token', '20260804', 'worker', '/product/', '商品頁', 'astro-ssg', twoSlotRange);
+
+  assert.equal(requests.length, 2); // 2 個 slot，每個 slot 只查一次（不是 ssr+ssg 兩次）
+  assert.ok(requests.every((r) => r.parameters.filters.some((f) => String(f.value).includes('astro-ssg'))));
+});
+
+test('fetchCacheHitLogs：傳 initialHourly/initialSlotStart 時，從指定 slot 續傳，不重查已完成的 slot', async (t) => {
+  resetRateLimiterForTests();
+  const requests = [];
+  t.mock.method(http, 'httpsRequest', async (_method, _url, _headers, body) => {
+    requests.push(JSON.parse(body));
+    return mockCacheHitBySlot({ [SLOT_MS]: 3 })('POST', '', {}, body);
+  });
+
+  const { totalHits, hourly } = await fetchCacheHitLogs(
+    'acc', 'token', '20260804', 'worker', '/product/', '商品頁', 'astro-ssg', twoSlotRange,
+    { initialHourly: [{ hour: '00:00', hitCount: 5 }], initialSlotStart: SLOT_MS },
+  );
+
+  assert.ok(requests.every((r) => r.timeframe.from === SLOT_MS), '不該重查第 1 個 slot');
+  assert.equal(requests.length, 1);
+
+  assert.equal(totalHits, 5 + 3);
+  assert.equal(hourly.length, 2);
 });

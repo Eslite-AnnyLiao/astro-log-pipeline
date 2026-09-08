@@ -13,6 +13,12 @@ module.exports = {
     cloudflare: {
       fileSuffix: '-product',
       combinedCacheHitKey: 'cloudflare_cache_hit',
+      // 2026-09-07 16:45 商品頁 SSR 快取搬進 Astro Worker Cache 後，
+      // total_ssr_hits 改用 Routing target 總數（見 daily-pipeline.js 的 mergeCloudflareIntoCombined）
+      // 減去 ssr_records 反推，recordsKey 指到 data_source_stats 裡對應那個欄位。
+      // hasSsg：商品頁的 SSG cache-hit log 沒受影響，仍照舊查詢。
+      recordsKey: 'ssr_records',
+      hasSsg: true,
     },
     datadog: {
       subQueries: [
@@ -61,6 +67,11 @@ module.exports = {
     cloudflare: {
       fileSuffix: '-category',
       combinedCacheHitKey: 'cloudflare_cache_hit_category',
+      // 分類頁快取 TTL 3 天，09-07 16:45 搬遷後舊快取條目要等 3 天才會全部過期，
+      // 為了不用另外追蹤「這 3 天內舊 log 還能信多少」，跟商品頁用同一個切換時間點，
+      // 一起改用 Routing target 反推（見 daily-pipeline.js 的 mergeCloudflareIntoCombined）。
+      recordsKey: 'category_records',
+      hasSsg: false, // 分類頁沒有 SSG，不查 astro-ssg cache-hit log
     },
     datadog: {
       subQueries: [

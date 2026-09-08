@@ -268,11 +268,21 @@ function mergeCloudflareIntoCombined(dateDigits, pageKindKey) {
   const cf = JSON.parse(fs.readFileSync(cfPath, 'utf8'));
   const combined = JSON.parse(fs.readFileSync(combinedPath, 'utf8'));
 
+  // 2026-09-07 16:45 後 SSR 快取搬進 Astro Worker Cache，CF 這邊已經沒有可靠的 SSR cache-hit
+  // log 可以直接查，改用 Routing target 總數（不分 hit/miss，見 fetch-cloudflare.js）減掉
+  // 同一天的 ssr_records（page-render 明細，即 cache miss）反推 SSR cache hit 數。
+  // Math.max(0, ...) 跟現有 SSG 計算式（src/datadog/fetch-datadog.js）同一個防呆慣例：
+  // 兩邊資料源時間窗沒有完全對齊時，避免負值污染下游。
+  const records = combined.data_source_stats?.[kind.cloudflare.recordsKey] ?? 0;
+  const derivedSsrHits = Math.max(0, cf.routing_target_ssr_total - records);
+
   combined[kind.cloudflare.combinedCacheHitKey] = {
-    total_ssr_hits: cf.total_ssr_hits,
+    total_ssr_hits: derivedSsrHits,
     total_ssg_hits: cf.total_ssg_hits,
-    total_hits: cf.total_hits,
-    hourly: cf.hourly,
+    total_hits: derivedSsrHits + cf.total_ssg_hits,
+    routing_target_ssr_total: cf.routing_target_ssr_total,
+    hourly_routing_target_ssr: cf.hourly_routing_target_ssr,
+    hourly_ssg_hits: cf.hourly_ssg_hits,
   };
   fs.writeFileSync(combinedPath, JSON.stringify(combined, null, 2), 'utf8');
   return true;
