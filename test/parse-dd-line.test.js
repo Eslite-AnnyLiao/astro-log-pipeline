@@ -2,10 +2,15 @@
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { parseDDLine, formatDDStage, ddSpeedStats, resetDDAttempt } = require('../bin/daily-pipeline');
+const { parseDDLine, formatDDStage, ddSpeedStats, resetDDAttempt, formatDDProgress } = require('../bin/daily-pipeline');
 
 function freshDisplay() {
-  return { dd: { pages: 0, aggregatePages: 0, startTime: null, pagesAtAttemptStart: 0, stage: '' } };
+  return {
+    dd: {
+      pages: 0, aggregatePages: 0, startTime: null,
+      pagesAtAttemptStart: 0, aggregatePagesAtAttemptStart: 0, stage: '',
+    },
+  };
 }
 
 test('formatDDStage：subQuery variant（如 product-ssr）換成「頁面類型 明細」', () => {
@@ -111,4 +116,35 @@ test('ddSpeedStats + resetDDAttempt：重試後只算「這次嘗試」新增的
   } finally {
     Date.now = originalNow;
   }
+});
+
+test('formatDDProgress：沒有中斷重試過（pagesAtAttemptStart 是 0）——正常執行不顯示「本次」，畫面維持原樣', () => {
+  const display = freshDisplay();
+  display.dd.pages = 42;
+  display.dd.aggregatePages = 3;
+
+  const { pagesLabel, aggLabel, resumed } = formatDDProgress(display.dd);
+  assert.equal(resumed, false);
+  assert.equal(pagesLabel, '明細 42 頁');
+  assert.equal(aggLabel, '聚合 3 頁');
+});
+
+test('formatDDProgress：中斷重跑過，同時顯示累計總數跟「本次」新抓的頁數，讓使用者分得清楚兩者', () => {
+  const display = freshDisplay();
+
+  // attempt 1：明細抓了 373 頁、聚合抓了 1 頁後中斷
+  display.dd.pages = 373;
+  display.dd.aggregatePages = 1;
+
+  // 重試：resetDDAttempt 記住 attempt 1 結束時的累計值
+  resetDDAttempt(display);
+
+  // attempt 2：這次又新抓了 118 頁明細、2 頁聚合（模擬今天早上遇到的商品頁明細補完 + 404 分段查詢）
+  display.dd.pages = 373 + 118;
+  display.dd.aggregatePages = 1 + 2;
+
+  const { pagesLabel, aggLabel, resumed } = formatDDProgress(display.dd);
+  assert.equal(resumed, true);
+  assert.equal(pagesLabel, '明細 491 頁（本次 118）', '要同時看得到累計總數跟這次 process 自己新抓的頁數');
+  assert.equal(aggLabel, '聚合 3 頁（本次 2）');
 });

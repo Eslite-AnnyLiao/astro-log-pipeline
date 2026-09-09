@@ -63,7 +63,10 @@ const CF_TOTAL_HOURS = Object.keys(PAGE_KINDS).length * 24;
 class ProgressDisplay {
   constructor() {
     this.cf = { hours: 0, hits: 0, done: false, error: null };
-    this.dd = { pages: 0, aggregatePages: 0, done: false, error: null, startTime: null, pagesAtAttemptStart: 0, stage: '' };
+    this.dd = {
+      pages: 0, aggregatePages: 0, done: false, error: null, startTime: null,
+      pagesAtAttemptStart: 0, aggregatePagesAtAttemptStart: 0, stage: '',
+    };
     this.analyzer = { state: 'waiting', done: false, error: null };
 
     this._spinIdx = 0;
@@ -108,10 +111,11 @@ class ProgressDisplay {
     } else if (this.dd.done) {
       ddInfo = `\x1b[32m✓ 完成  明細 ${this.dd.pages} 頁  聚合 ${this.dd.aggregatePages} 頁\x1b[0m`;
     } else {
-      let detail = `${this.dd.stage ? `[${this.dd.stage}]  ` : ''}明細 ${this.dd.pages} 頁  聚合 ${this.dd.aggregatePages} 頁`;
+      const { pagesLabel, aggLabel } = formatDDProgress(this.dd);
+      let detail = `${this.dd.stage ? `[${this.dd.stage}]  ` : ''}${pagesLabel}  ${aggLabel}`;
       const speed = ddSpeedStats(this.dd);
       if (speed) {
-        detail += `  ${speed.avgS}s/頁  已耗時 ${Math.round(speed.elapsedS)}s`;
+        detail += `  ${speed.avgS}s/頁（本次算）  已耗時 ${Math.round(speed.elapsedS)}s`;
       }
       ddInfo = `${sp}  下載中  ${detail}`;
     }
@@ -253,15 +257,34 @@ function parseDDLine(line, display) {
 // pages/aggregatePages 本身的累計顯示不受影響。
 function ddSpeedStats(dd) {
   const pagesThisAttempt = dd.pages - (dd.pagesAtAttemptStart || 0);
+  const aggregatePagesThisAttempt = dd.aggregatePages - (dd.aggregatePagesAtAttemptStart || 0);
   if (!dd.startTime || pagesThisAttempt < 2) return null;
   const elapsedS = (Date.now() - dd.startTime) / 1000;
-  return { pagesThisAttempt, elapsedS, avgS: (elapsedS / pagesThisAttempt).toFixed(1) };
+  return {
+    pagesThisAttempt, aggregatePagesThisAttempt, elapsedS,
+    avgS: (elapsedS / pagesThisAttempt).toFixed(1),
+  };
+}
+
+// 中斷重跑過（pagesAtAttemptStart > 0）才額外標「本次」新抓的頁數，讓使用者看得出來
+// 累計總數裡有多少是延續之前進度、多少是這次 process 自己重新抓的；正常沒中斷過的
+// 執行不會有這個標記，畫面維持原樣不受干擾。
+function formatDDProgress(dd) {
+  const resumed = (dd.pagesAtAttemptStart || 0) > 0 || (dd.aggregatePagesAtAttemptStart || 0) > 0;
+  const pagesLabel = resumed
+    ? `明細 ${dd.pages} 頁（本次 ${dd.pages - dd.pagesAtAttemptStart}）`
+    : `明細 ${dd.pages} 頁`;
+  const aggLabel = resumed
+    ? `聚合 ${dd.aggregatePages} 頁（本次 ${dd.aggregatePages - dd.aggregatePagesAtAttemptStart}）`
+    : `聚合 ${dd.aggregatePages} 頁`;
+  return { pagesLabel, aggLabel, resumed };
 }
 
 // retryAsync 每次重新嘗試（attempt > 1）呼叫，把速度計算的起點重設成「這次嘗試」，
 // 不影響 dd.pages/aggregatePages 本身的累計值。
 function resetDDAttempt(display) {
   display.dd.pagesAtAttemptStart = display.dd.pages;
+  display.dd.aggregatePagesAtAttemptStart = display.dd.aggregatePages;
   display.dd.startTime = null;
 }
 
@@ -594,5 +617,5 @@ if (require.main === module) {
 
 module.exports = {
   mergeCloudflareIntoCombined, mergeErrors404IntoCombined, runWithProgress, LOG_DIR,
-  parseCFLine, parseDDLine, formatDDStage, ddSpeedStats, resetDDAttempt,
+  parseCFLine, parseDDLine, formatDDStage, ddSpeedStats, resetDDAttempt, formatDDProgress,
 };
