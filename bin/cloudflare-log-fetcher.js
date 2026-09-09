@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 'use strict';
 
-// 從 Cloudflare Logs Explorer SQL API 取得指定日期含有 "Astro cache hit for" 的 log
+// 從 Cloudflare Workers Observability API 取得指定日期的 "Routing target for" 總流量，
+// 商品頁另外查 "Astro cache hit for X: astro-ssg"（分類頁沒有 SSG，不查）
 //
 // 用法:
 //   node bin/cloudflare-log-fetcher.js --date <YYYYMMDD>
