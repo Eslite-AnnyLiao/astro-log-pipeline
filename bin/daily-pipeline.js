@@ -63,7 +63,7 @@ const CF_TOTAL_HOURS = Object.keys(PAGE_KINDS).length * 24;
 class ProgressDisplay {
   constructor() {
     this.cf = { hours: 0, hits: 0, done: false, error: null };
-    this.dd = { pages: 0, aggregatePages: 0, done: false, error: null, startTime: null, stage: '' };
+    this.dd = { pages: 0, aggregatePages: 0, done: false, error: null, startTime: null, pagesAtAttemptStart: 0, stage: '' };
     this.analyzer = { state: 'waiting', done: false, error: null };
 
     this._spinIdx = 0;
@@ -109,10 +109,9 @@ class ProgressDisplay {
       ddInfo = `\x1b[32m✓ 完成  明細 ${this.dd.pages} 頁  聚合 ${this.dd.aggregatePages} 頁\x1b[0m`;
     } else {
       let detail = `${this.dd.stage ? `[${this.dd.stage}]  ` : ''}明細 ${this.dd.pages} 頁  聚合 ${this.dd.aggregatePages} 頁`;
-      if (this.dd.startTime && this.dd.pages >= 2) {
-        const elapsedS = (Date.now() - this.dd.startTime) / 1000;
-        const avgS = (elapsedS / this.dd.pages).toFixed(1);
-        detail += `  ${avgS}s/頁  已耗時 ${Math.round(elapsedS)}s`;
+      const speed = ddSpeedStats(this.dd);
+      if (speed) {
+        detail += `  ${speed.avgS}s/頁  已耗時 ${Math.round(speed.elapsedS)}s`;
       }
       ddInfo = `${sp}  下載中  ${detail}`;
     }
@@ -245,6 +244,25 @@ function parseDDLine(line, display) {
     if (!display.dd.startTime) display.dd.startTime = Date.now();
     display.dd.pages++;
   }
+}
+
+// dd.pages 跨重試刻意不歸零（見 main() 呼叫端註解：checkpoint 續傳要讓總頁數如實累加，
+// 不能看起來像從頭重來）。但拿「從第一次嘗試就沒動過的 startTime」去除總頁數算平均速度，
+// 會把重試之間「行程沒在跑、只是在等下一次嘗試」的空檔時間也算進分母，讓已經恢復正常的
+// 下載速度看起來一直很慢。改成只拿「這次嘗試」新增的頁數／新的起始時間算速度，
+// pages/aggregatePages 本身的累計顯示不受影響。
+function ddSpeedStats(dd) {
+  const pagesThisAttempt = dd.pages - (dd.pagesAtAttemptStart || 0);
+  if (!dd.startTime || pagesThisAttempt < 2) return null;
+  const elapsedS = (Date.now() - dd.startTime) / 1000;
+  return { pagesThisAttempt, elapsedS, avgS: (elapsedS / pagesThisAttempt).toFixed(1) };
+}
+
+// retryAsync 每次重新嘗試（attempt > 1）呼叫，把速度計算的起點重設成「這次嘗試」，
+// 不影響 dd.pages/aggregatePages 本身的累計值。
+function resetDDAttempt(display) {
+  display.dd.pagesAtAttemptStart = display.dd.pages;
+  display.dd.startTime = null;
 }
 
 // ============================
@@ -481,11 +499,14 @@ async function main() {
       .catch((err) => { display.cf.error = err.message; });
 
     const ddPromise = retryAsync(
-      () => {
+      (attempt) => {
         // 跟 CF 不同：dd.pages/aggregatePages 重試時刻意不歸零。datadog-log-fetcher.js 對已經
         // 中斷的 subQuery 會從 checkpoint 續傳（見 src/datadog/fetch-datadog.js），如果這裡把畫面
         // 計數器重設成 0，會讓「其實有正確接續下載」看起來像整個從頭重來，造成誤判。累計計數器
         // 保留跨重試的總頁數，才能如實反映實際下載進度。
+        // 但拿來算「秒/頁」平均速度的起始時間要重設（resetDDAttempt），不然會把上次嘗試失敗
+        // 到這次重新啟動之間的等待空檔也算進平均速度，讓已經恢復正常的下載看起來一直很慢。
+        if (attempt > 1) resetDDAttempt(display);
         return runWithProgress(
           'datadog-log-fetcher.js',
           ['--date', dateDigits, ...envFlag, ...debugFlag],
@@ -573,5 +594,5 @@ if (require.main === module) {
 
 module.exports = {
   mergeCloudflareIntoCombined, mergeErrors404IntoCombined, runWithProgress, LOG_DIR,
-  parseCFLine, parseDDLine, formatDDStage,
+  parseCFLine, parseDDLine, formatDDStage, ddSpeedStats, resetDDAttempt,
 };
