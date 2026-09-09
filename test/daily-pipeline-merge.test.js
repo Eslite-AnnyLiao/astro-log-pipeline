@@ -59,14 +59,14 @@ test('mergeCloudflareIntoCombined：兩者都存在 → 拿 Routing target 總�
   try {
     ensureDir(cfPath);
     fs.writeFileSync(cfPath, JSON.stringify({
-      routing_target_ssr_total: 130, total_ssg_hits: 20,
+      routing_target_ssr_total: 130, routing_target_ssg_total: null, total_ssg_hits: 20,
       hourly_routing_target_ssr: [{ hour: '10:00', routingCount: 130 }],
       hourly_ssg_hits: [{ hour: '10:00', hitCount: 20 }],
     }), 'utf8');
     ensureDir(combinedPath);
     fs.writeFileSync(combinedPath, JSON.stringify({
       existing_key: 'keep-me',
-      data_source_stats: { ssr_records: 100 },
+      data_source_stats: { ssr_records: 100, ssg_records: 999 },
     }), 'utf8');
 
     const merged = mergeCloudflareIntoCombined(DATE, KIND);
@@ -82,6 +82,8 @@ test('mergeCloudflareIntoCombined：兩者都存在 → 拿 Routing target 總�
       hourly_routing_target_ssr: [{ hour: '10:00', routingCount: 130 }],
       hourly_ssg_hits: [{ hour: '10:00', hitCount: 20 }],
     });
+    // routing_target_ssg_total 是 null（模擬分類頁沒有 SSG）：不動 ssg_records 原有的值
+    assert.equal(combined.data_source_stats.ssg_records, 999);
   } finally {
     cleanup();
   }
@@ -92,7 +94,7 @@ test('mergeCloudflareIntoCombined：Routing target 總數小於 ssr_records（�
   try {
     ensureDir(cfPath);
     fs.writeFileSync(cfPath, JSON.stringify({
-      routing_target_ssr_total: 90, total_ssg_hits: 0,
+      routing_target_ssr_total: 90, routing_target_ssg_total: null, total_ssg_hits: 0,
       hourly_routing_target_ssr: [], hourly_ssg_hits: [],
     }), 'utf8');
     ensureDir(combinedPath);
@@ -102,6 +104,52 @@ test('mergeCloudflareIntoCombined：Routing target 總數小於 ssr_records（�
 
     const combined = JSON.parse(fs.readFileSync(combinedPath, 'utf8'));
     assert.equal(combined.cloudflare_cache_hit.total_ssr_hits, 0);
+  } finally {
+    cleanup();
+  }
+});
+
+test('mergeCloudflareIntoCombined：有 routing_target_ssg_total（商品頁）時，改用它減掉 total_ssg_hits 覆蓋 data_source_stats.ssg_records', () => {
+  cleanup();
+  try {
+    ensureDir(cfPath);
+    fs.writeFileSync(cfPath, JSON.stringify({
+      routing_target_ssr_total: 130, routing_target_ssg_total: 50, total_ssg_hits: 20,
+      hourly_routing_target_ssr: [], hourly_ssg_hits: [],
+    }), 'utf8');
+    ensureDir(combinedPath);
+    fs.writeFileSync(combinedPath, JSON.stringify({
+      // 這個 999 是舊的 handler_type:fetch 減法算出來的估計值，應該被新算法覆蓋掉
+      data_source_stats: { ssr_records: 100, ssg_records: 999 },
+    }), 'utf8');
+
+    mergeCloudflareIntoCombined(DATE, KIND);
+
+    const combined = JSON.parse(fs.readFileSync(combinedPath, 'utf8'));
+    // 50 (SSG routing target 總數) - 20 (SSG cache hit) = 30
+    assert.equal(combined.data_source_stats.ssg_records, 30);
+  } finally {
+    cleanup();
+  }
+});
+
+test('mergeCloudflareIntoCombined：SSG routing target 總數小於 cache hit 數（時間窗誤差）時，ssg_records 夾在 0', () => {
+  cleanup();
+  try {
+    ensureDir(cfPath);
+    fs.writeFileSync(cfPath, JSON.stringify({
+      routing_target_ssr_total: 130, routing_target_ssg_total: 10, total_ssg_hits: 20,
+      hourly_routing_target_ssr: [], hourly_ssg_hits: [],
+    }), 'utf8');
+    ensureDir(combinedPath);
+    fs.writeFileSync(combinedPath, JSON.stringify({
+      data_source_stats: { ssr_records: 100, ssg_records: 999 },
+    }), 'utf8');
+
+    mergeCloudflareIntoCombined(DATE, KIND);
+
+    const combined = JSON.parse(fs.readFileSync(combinedPath, 'utf8'));
+    assert.equal(combined.data_source_stats.ssg_records, 0);
   } finally {
     cleanup();
   }

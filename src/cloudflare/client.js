@@ -206,12 +206,14 @@ async function fetchSingleTypeLogs(accountId, apiToken, dateDigits, worker, path
 // "Astro cache hit for X: astro-ssr" log 不再可靠。改用路由決策當下就會印的
 // "Routing target for X: astro-ssr" log 取得「總流量」（不分 cache hit/miss，只要被
 // 路由到 SSR 就會印），再用 (這個總數 - 現有 ssr_records) 反推 SSR cache hit 數。
-async function fetchRoutingTargetLogs(accountId, apiToken, dateDigits, worker, pathPrefix, typeLabel, buildUTCRange, opts = {}) {
+// routingTarget 也可傳 'astro-ssg'：直接查商品頁 SSG 的總流量，取代原本用
+// @cloudflare.handler_type:fetch 減法反推、容易被 SSR cache hit 混進去污染的估計值。
+async function fetchRoutingTargetLogs(accountId, apiToken, dateDigits, worker, pathPrefix, typeLabel, routingTarget, buildUTCRange, opts = {}) {
   const initialHourly = (opts.initialHourly || []).map((h) => ({ hour: h.hour, count: h.routingCount }));
   const { total, hourly } = await fetchSingleTypeLogs(
     accountId, apiToken, dateDigits, worker, pathPrefix, typeLabel, buildUTCRange,
-    (w, p) => buildRoutingTargetFilters(w, 'astro-ssr', p),
-    'Routing target astro-ssr',
+    (w, p) => buildRoutingTargetFilters(w, routingTarget, p),
+    `Routing target ${routingTarget}`,
     {
       ...opts,
       initialHourly,

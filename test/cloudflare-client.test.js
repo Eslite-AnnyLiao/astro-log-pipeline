@@ -20,12 +20,12 @@ function makeCfSuccess(value) {
   };
 }
 
-function mockRoutingTargetBySlot(countsBySlotFrom) {
+function mockRoutingTargetBySlot(countsBySlotFrom, expectedType = 'astro-ssr') {
   return async (_method, _url, _headers, body) => {
     const parsed = JSON.parse(body);
     const from = parsed.timeframe.from;
-    const isRoutingTarget = parsed.parameters.filters.some((f) => String(f.value).startsWith('^Routing target for'));
-    assert.ok(isRoutingTarget, 'fetchRoutingTargetLogs 應該查 Routing target 訊息，不是 Astro cache hit');
+    const isRoutingTarget = parsed.parameters.filters.some((f) => String(f.value) === `^Routing target for .+: ${expectedType}$`);
+    assert.ok(isRoutingTarget, `fetchRoutingTargetLogs 應該查 Routing target for .+: ${expectedType} 這個訊息`);
     return makeCfSuccess(countsBySlotFrom[from]);
   };
 }
@@ -38,11 +38,25 @@ test('fetchRoutingTargetLogs：不傳 opts 時兩個 slot 都查、結果正確�
   }));
 
   const { totalRoutingCount, hourly } = await fetchRoutingTargetLogs(
-    'acc', 'token', '20260908', 'worker', '/product/', '商品頁', twoSlotRange,
+    'acc', 'token', '20260908', 'worker', '/product/', '商品頁', 'astro-ssr', twoSlotRange,
   );
 
   assert.equal(totalRoutingCount, 30);
   assert.equal(hourly.length, 2);
+});
+
+test('fetchRoutingTargetLogs：routingTarget 傳 astro-ssg 時查的是 SSG 的 Routing target，不是 SSR', async (t) => {
+  resetRateLimiterForTests();
+  t.mock.method(http, 'httpsRequest', mockRoutingTargetBySlot({
+    0: 3,
+    [SLOT_MS]: 4,
+  }, 'astro-ssg'));
+
+  const { totalRoutingCount } = await fetchRoutingTargetLogs(
+    'acc', 'token', '20260908', 'worker', '/product/', '商品頁', 'astro-ssg', twoSlotRange,
+  );
+
+  assert.equal(totalRoutingCount, 7);
 });
 
 test('fetchRoutingTargetLogs：傳 initialHourly/initialSlotStart 時，從指定 slot 續傳，不重查已完成的 slot', async (t) => {
@@ -54,7 +68,7 @@ test('fetchRoutingTargetLogs：傳 initialHourly/initialSlotStart 時，從指�
   });
 
   const { totalRoutingCount, hourly } = await fetchRoutingTargetLogs(
-    'acc', 'token', '20260908', 'worker', '/product/', '商品頁', twoSlotRange,
+    'acc', 'token', '20260908', 'worker', '/product/', '商品頁', 'astro-ssr', twoSlotRange,
     { initialHourly: [{ hour: '00:00', routingCount: 5 }], initialSlotStart: SLOT_MS },
   );
 

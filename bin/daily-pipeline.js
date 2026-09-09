@@ -325,6 +325,15 @@ function mergeCloudflareIntoCombined(dateDigits, pageKindKey) {
     hourly_routing_target_ssr: cf.hourly_routing_target_ssr,
     hourly_ssg_hits: cf.hourly_ssg_hits,
   };
+
+  // 商品 SSG Worker 請求數改用直接查到的 Routing target 總數（不分 hit/miss）減掉 SSG
+  // cache hit 數，取代原本用 handler_type:fetch 減法反推、容易被 SSR cache hit 混進去
+  // 污染的估計值（見 src/config/page-kinds.js 的 computedCount）。只有商品頁這種有 SSG
+  // 的頁面類型才會有 cf.routing_target_ssg_total，分類頁沒有 SSG，不受影響。
+  if (cf.routing_target_ssg_total != null && combined.data_source_stats) {
+    combined.data_source_stats.ssg_records = Math.max(0, cf.routing_target_ssg_total - cf.total_ssg_hits);
+  }
+
   fs.writeFileSync(combinedPath, JSON.stringify(combined, null, 2), 'utf8');
   return true;
 }

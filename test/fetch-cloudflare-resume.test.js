@@ -29,11 +29,17 @@ function outDirFor(name) {
   return path.join(process.cwd(), 'daily-analysis-result', name);
 }
 
-function isRoutingTargetReq(parsed) {
-  return parsed.parameters.filters.some((f) => String(f.value).startsWith('^Routing target for'));
+// 商品頁現在有三條獨立查詢：Routing target astro-ssr、Routing target astro-ssg、
+// Astro cache hit astro-ssg，用訊息內容分辨是哪一條。
+function classifyReq(parsed) {
+  const msg = parsed.parameters.filters.find((f) => f.key === 'message')?.value || '';
+  if (msg.includes('Routing target') && msg.includes('astro-ssr')) return 'routingSsr';
+  if (msg.includes('Routing target') && msg.includes('astro-ssg')) return 'routingSsg';
+  if (msg.includes('Astro cache hit') && msg.includes('astro-ssg')) return 'cacheHitSsg';
+  throw new Error(`無法辨識的查詢訊息: ${msg}`);
 }
 
-test('fetchAndSave（商品頁，有 SSG）：Routing target 查完、SSG 中途失敗後重跑，只補 SSG 沒查完的 slot', async (t) => {
+test('fetchAndSave（商品頁，有 SSG）：Routing target astro-ssr/astro-ssg 查完、SSG cache-hit 中途失敗後重跑，只補沒查完的那條', async (t) => {
   resetRateLimiterForTests();
   const outDir = outDirFor('TEST-cf-resume-product');
   fs.rmSync(outDir, { recursive: true, force: true });
@@ -41,12 +47,16 @@ test('fetchAndSave（商品頁，有 SSG）：Routing target 查完、SSG 中途
 
   const args = { accountId: 'acc', apiToken: 'token', worker: 'www-eslite-com' };
 
-  // Routing target 兩個 slot 都成功；SSG 第 1 個 slot 成功，第 2 個 slot 失敗（模擬中斷）
+  // 執行順序是 routingSsr → cacheHitSsg → routingSsg（見 fetch-cloudflare.js 的 fetchAndSave）。
+  // 讓 routingSsr、cacheHitSsg 兩個都完整查完，routingSsg 第 2 個 slot 失敗（模擬中斷），
+  // 驗證前兩個「已完成」的查詢不會因為第三個失敗而被重跑。
   t.mock.method(http, 'httpsRequest', async (_method, _url, _headers, body) => {
     const parsed = JSON.parse(body);
-    if (isRoutingTargetReq(parsed)) return makeCfSuccess(10);
-    if (parsed.timeframe.from === slotFrom(1)) return { status: 400, headers: {}, body: '模擬 SSG 第 2 個 slot 查詢失敗' };
-    return makeCfSuccess(1);
+    const kind = classifyReq(parsed);
+    if (kind === 'routingSsr') return makeCfSuccess(10);
+    if (kind === 'cacheHitSsg') return makeCfSuccess(1);
+    if (parsed.timeframe.from === slotFrom(1)) return { status: 400, headers: {}, body: '模擬 Routing target astro-ssg 第 2 個 slot 查詢失敗' };
+    return makeCfSuccess(3);
   });
 
   await assert.rejects(
@@ -54,34 +64,37 @@ test('fetchAndSave（商品頁，有 SSG）：Routing target 查完、SSG 中途
     /HTTP 400/,
   );
 
-  // 重跑：Routing target 跟 SSG 都用永遠成功的 mock，驗證 Routing target 兩個 slot 都不會重查
-  // （因為它上次就已經完整查完，中斷的只有 SSG），SSG 只補第 2 個 slot
+  // 重跑：全部用永遠成功的 mock，驗證前兩條（routingSsr、cacheHitSsg）都不會重查
+  // （上次就已經完整查完，中斷的只有 routingSsg），routingSsg 只補第 2 個 slot
   resetRateLimiterForTests();
   const requests = [];
   t.mock.method(http, 'httpsRequest', async (_method, _url, _headers, body) => {
     const parsed = JSON.parse(body);
     requests.push(parsed);
-    if (isRoutingTargetReq(parsed)) return makeCfSuccess(10);
-    return makeCfSuccess(1);
+    const kind = classifyReq(parsed);
+    if (kind === 'routingSsr') return makeCfSuccess(10);
+    if (kind === 'cacheHitSsg') return makeCfSuccess(1);
+    return makeCfSuccess(3);
   });
 
   const { jsonPath } = await fetchAndSave(args, DATE_DIGITS, '2026-09-08', outDir, 'product', twoSlotRange);
 
-  const routingReqs = requests.filter(isRoutingTargetReq);
-  const ssgReqs = requests.filter((r) => !isRoutingTargetReq(r));
-  assert.equal(routingReqs.length, 0, 'Routing target 上次已完整查完，重跑不該再查');
-  assert.equal(ssgReqs.length, 1, 'SSG 只該補查中斷掉的第 2 個 slot');
-  assert.ok(ssgReqs.every((r) => r.timeframe.from === slotFrom(1)));
+  const byKind = { routingSsr: 0, routingSsg: 0, cacheHitSsg: 0 };
+  requests.forEach((r) => byKind[classifyReq(r)]++);
+  assert.equal(byKind.routingSsr, 0, 'Routing target astro-ssr 上次已完整查完，重跑不該再查');
+  assert.equal(byKind.cacheHitSsg, 0, 'SSG cache-hit 上次已完整查完，重跑不該再查');
+  assert.equal(byKind.routingSsg, 1, 'Routing target astro-ssg 只該補查中斷掉的第 2 個 slot');
 
   const output = JSON.parse(fs.readFileSync(jsonPath, 'utf8'));
   assert.equal(output.routing_target_ssr_total, 20); // 兩個 slot 各 10
+  assert.equal(output.routing_target_ssg_total, 6); // 兩個 slot 各 3
   assert.equal(output.total_ssg_hits, 2); // 第 1 個 slot 續傳帶進來的 1 + 第 2 個 slot 重查到的 1
 
   const checkpointPath = jsonPath.replace(/\.json$/, '.checkpoint.json');
   assert.equal(fs.existsSync(checkpointPath), false);
 });
 
-test('fetchAndSave（分類頁，無 SSG）：不查 astro-ssg，只查 Routing target', async (t) => {
+test('fetchAndSave（分類頁，無 SSG）：不查 astro-ssg 相關的任何查詢，只查 Routing target astro-ssr', async (t) => {
   resetRateLimiterForTests();
   const outDir = outDirFor('TEST-cf-resume-category');
   fs.rmSync(outDir, { recursive: true, force: true });
@@ -97,11 +110,13 @@ test('fetchAndSave（分類頁，無 SSG）：不查 astro-ssg，只查 Routing 
 
   const { jsonPath } = await fetchAndSave(args, DATE_DIGITS, '2026-09-08', outDir, 'category', twoSlotRange);
 
-  assert.ok(requests.every(isRoutingTargetReq), '分類頁沒有 SSG，全部請求都該是 Routing target');
+  assert.ok(requests.every((r) => classifyReq(r) === 'routingSsr'), '分類頁沒有 SSG，全部請求都該是 Routing target astro-ssr');
   assert.equal(requests.length, 2); // 2 個 slot，各查一次
 
   const output = JSON.parse(fs.readFileSync(jsonPath, 'utf8'));
   assert.equal(output.routing_target_ssr_total, 10);
+  assert.equal(output.routing_target_ssg_total, null);
   assert.equal(output.total_ssg_hits, 0);
   assert.deepEqual(output.hourly_ssg_hits, []);
+  assert.deepEqual(output.hourly_routing_target_ssg, []);
 });
