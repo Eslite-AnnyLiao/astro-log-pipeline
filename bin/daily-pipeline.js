@@ -96,7 +96,7 @@ class ProgressDisplay {
     if (this.cf.error) {
       cfInfo = `\x1b[31m✗ 失敗\x1b[0m`;
     } else if (this.cf.done) {
-      cfInfo = `${this._bar(CF_TOTAL_HOURS, CF_TOTAL_HOURS)}  \x1b[32m✓ 完成  cache hit: ${this.cf.hits} 次\x1b[0m`;
+      cfInfo = `${this._bar(CF_TOTAL_HOURS, CF_TOTAL_HOURS)}  \x1b[32m✓ 完成  流量: ${this.cf.hits} 次\x1b[0m`;
     } else {
       cfInfo = `${this._bar(this.cf.hours, CF_TOTAL_HOURS)}  ${this.cf.hours}/${CF_TOTAL_HOURS} hr`;
     }
@@ -203,12 +203,12 @@ function parseCFLine(line, display) {
     if (endMins <= startMins) endMins += 24 * 60; // 跨午夜
     display.cf.hours = Math.min(display.cf.hours + (endMins - startMins) / 60, CF_TOTAL_HOURS);
   }
-  // 每輪查詢結束會各印一次：Astro cache hit  SSR: N 次  SSG: N 次，各輪加總為最終 hit 數
-  const mSsr = line.match(/SSR:\s*(\d+)\s*次/);
-  const mSsg = line.match(/SSG:\s*(\d+)\s*次/);
-  if (mSsr && mSsg) {
-    display.cf.hits += parseInt(mSsr[1]) + parseInt(mSsg[1]);
-  }
+  // 每輪查詢結束會分開各印一次（不像舊版 fetchAllLogs 印在同一行）：
+  // "Routing target astro-ssr: N 次"、"Astro cache hit astro-ssg: N 次"，各自累加進同一個顯示計數。
+  const mRouting = line.match(/Routing target astro-ssr:\s*(\d+)\s*次/);
+  const mSsgHit = line.match(/Astro cache hit astro-ssg:\s*(\d+)\s*次/);
+  if (mRouting) display.cf.hits += parseInt(mRouting[1]);
+  if (mSsgHit) display.cf.hits += parseInt(mSsgHit[1]);
 }
 
 // datadog-log-fetcher.js 每個查詢區段開始時會印一行 `[label] Query: ...` 或
