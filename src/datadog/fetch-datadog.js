@@ -56,7 +56,7 @@ async function fetchSubQueryToFile(apiKey, appKey, sq, query, fromISO, toISO, da
   // 重新 spawn 一份全新 process 執行 main()）不該把這個 subQuery 從頭重抓一次。
   if (fs.existsSync(outPath) && checkpoint && Number.isInteger(checkpoint.total)) {
     console.log(`  ✓ [${sq.variant}] 先前已完整下載完成（${checkpoint.total} 筆），略過重抓`);
-    return { outPath, total: checkpoint.total };
+    return { outPath, total: checkpoint.total, checkpointPath };
   }
 
   // 續傳條件：checkpoint 跟本次查詢條件一致，且 tmp 檔至少涵蓋 checkpoint 記錄的長度
@@ -71,7 +71,7 @@ async function fetchSubQueryToFile(apiKey, appKey, sq, query, fromISO, toISO, da
     // fetchAllLogs——那樣會被當成從頭抓，把整批資料重複 append 在已經完整的 tmp 檔後面。
     fs.renameSync(tmpPath, outPath);
     console.log(`  ✓ [${sq.variant}] 上次已抓完最後一頁但尚未落地，直接完成（${checkpoint.total} 筆）`);
-    return { outPath, total: checkpoint.total };
+    return { outPath, total: checkpoint.total, checkpointPath };
   }
 
   let fd = null;
@@ -108,10 +108,12 @@ async function fetchSubQueryToFile(apiKey, appKey, sq, query, fromISO, toISO, da
   );
   fs.closeSync(fd);
   fs.renameSync(tmpPath, outPath);
-  // 不清掉 checkpoint：留著當完成紀錄（此時 checkpoint.cursor 已經是 null），供之後如果又被
-  // 重跑，能靠上面的「已完成，略過」判斷直接跳過，不用重抓。
+  // 這裡不清掉 checkpoint：留著當完成紀錄，供同一次 main() 執行中途若其他 subQuery/kind
+  // 失敗、process 被重新 spawn 時，能靠上面的「已完成，略過」判斷直接跳過，不用重抓。
+  // 只有等 main() 確認「這次要下載的東西全部都成功」之後，才會統一清掉這裡回傳的 checkpointPath
+  // （見 main() 最後的 cleanup），避免全部下載完成後，這些只在中途重跑才有用的紀錄檔一直留著。
 
-  return { outPath, total };
+  return { outPath, total, checkpointPath };
 }
 
 // 404 streaming fallback：分時間窗查詢、每個窗口完整跑完才 checkpoint（窗口內部的分頁失敗
@@ -130,7 +132,7 @@ async function fetchWindowed404ToFile(apiKey, appKey, e, kindKey, query, dateDig
     const doneMap = new Map((checkpoint.map || []).map(([k, arr]) => [k, new Set(arr)]));
     const doneRaw404Total = checkpoint.raw404Total || 0;
     console.log(`  ✓ [404-${kindKey}] 先前已完整下載完成（共 ${doneMap.size} 個 key，掃描 ${doneRaw404Total} 筆），略過重抓`);
-    return { map: doneMap, raw404Total: doneRaw404Total };
+    return { map: doneMap, raw404Total: doneRaw404Total, checkpointPath };
   }
 
   let map = new Map();
@@ -170,10 +172,9 @@ async function fetchWindowed404ToFile(apiKey, appKey, e, kindKey, query, dateDig
   }
 
   fs.writeFileSync(outPath, logs404ToCsv(map, e.keyLabel), 'utf8');
-  // 不清掉 checkpoint：留著當完成紀錄，供之後如果又被重跑，能靠上面的「已完成，略過」判斷
-  // 直接跳過，不用把所有時間窗重新掃一次。
+  // 這裡不清掉 checkpoint，理由同 fetchSubQueryToFile：留給 main() 確認整批全部成功後統一清掉。
 
-  return { map, raw404Total };
+  return { map, raw404Total, checkpointPath };
 }
 
 async function main() {
@@ -218,16 +219,18 @@ async function main() {
   console.log('');
 
   const savedLines = [];
+  const checkpointPaths = [];
 
   for (const kindKey of activeKinds) {
     const kind = PAGE_KINDS[kindKey];
     const subQueryCounts = {};
 
     if (!args.only404) for (const sq of kind.datadog.subQueries) {
-      const { outPath, total } = await fetchSubQueryToFile(
+      const { outPath, total, checkpointPath } = await fetchSubQueryToFile(
         args.apiKey, args.appKey, sq, sq.queryTemplate(worker), fromISO, toISO, dateDigits,
       );
       subQueryCounts[sq.variant] = total;
+      checkpointPaths.push(checkpointPath);
       savedLines.push(`• ${sq.variant} : ${outPath}  (${total} 筆)`);
     }
 
@@ -277,11 +280,20 @@ async function main() {
         }
       }
 
-      const { map, raw404Total } = await fetchWindowed404ToFile(
+      const { map, raw404Total, checkpointPath } = await fetchWindowed404ToFile(
         args.apiKey, args.appKey, e, kindKey, e.queryTemplate(worker), dateDigits, outPath,
       );
+      checkpointPaths.push(checkpointPath);
       savedLines.push(`• 404(${kind.label}) : ${outPath}  (共 ${map.size} 個 key，掃描 ${raw404Total} 筆)`);
     }
+  }
+
+  // 走到這裡代表這次要下載的東西（activeKinds 全部）都成功了，中途沒有丟錯讓 process 提早退出——
+  // 只有在這個前提下才能放心清掉 checkpoint：fetchSubQueryToFile/fetchWindowed404ToFile 自己
+  // 完成時刻意不清（見各自函式內的註解），是為了讓「這次跑到一半、process 被重新 spawn」的情境
+  // 能靠 checkpoint 跳過已完成的部分；一旦整批都成功，這些紀錄檔就沒用了，留著只是佔空間。
+  for (const checkpointPath of checkpointPaths) {
+    if (checkpointPath && fs.existsSync(checkpointPath)) fs.unlinkSync(checkpointPath);
   }
 
   console.log('結果已儲存:');
