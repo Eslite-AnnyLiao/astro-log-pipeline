@@ -40,12 +40,13 @@ async function fetchLogsPage(apiKey, appKey, params, retries = 0) {
   try {
     res = await http.httpsRequest('POST', url, headers, JSON.stringify(params));
   } catch (err) {
-    if (retries < MAX_RETRIES) {
-      console.log(`  [網路錯誤] ${err.message}，10s 後重試 (${retries + 1}/${MAX_RETRIES})...`);
-      await sleep(10_000);
-      return fetchLogsPage(apiKey, appKey, params, retries + 1);
-    }
-    throw err;
+    // 網路層錯誤（DNS/連線中斷/逾時）跟 429/500 不同：不是伺服器明確告知的暫時性狀態，
+    // 而多半是本機網路或中繼點的暫時性問題，沒有「重試幾次就該放棄」的理由——放棄只會讓
+    // 整支 subQuery 因為一次網路波動而讓 process 整個掛掉（即使有 checkpoint 續傳也要重新
+    // spawn），不如就地一直重試，網路一恢復就會自己接著抓。
+    console.log(`  [網路錯誤] ${err.message}，10s 後重試（第 ${retries + 1} 次）...`);
+    await sleep(10_000);
+    return fetchLogsPage(apiKey, appKey, params, retries + 1);
   }
 
   if (DEBUG) {
@@ -100,12 +101,10 @@ async function fetchAggregatePage(apiKey, appKey, params, retries = 0) {
   try {
     res = await http.httpsRequest('POST', url, headers, JSON.stringify(params));
   } catch (err) {
-    if (retries < MAX_RETRIES) {
-      console.log(`  [網路錯誤] ${err.message}，10s 後重試 (${retries + 1}/${MAX_RETRIES})...`);
-      await sleep(10_000);
-      return fetchAggregatePage(apiKey, appKey, params, retries + 1);
-    }
-    throw err;
+    // 網路層錯誤不設重試上限，理由同 fetchLogsPage：見上方註解。
+    console.log(`  [網路錯誤] ${err.message}，10s 後重試（第 ${retries + 1} 次）...`);
+    await sleep(10_000);
+    return fetchAggregatePage(apiKey, appKey, params, retries + 1);
   }
 
   if (DEBUG) {

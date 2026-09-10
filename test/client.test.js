@@ -22,6 +22,26 @@ function makeAggregateRes(buckets, cursor) {
   };
 }
 
+test('fetchAllLogs：網路層錯誤不設重試上限，超過舊版 MAX_RETRIES=3 之後恢復連線仍要能成功，不能提早放棄', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let call = 0;
+  t.mock.method(http, 'httpsRequest', async () => {
+    call++;
+    if (call <= 5) throw new Error('模擬網路錯誤 ECONNRESET');
+    return makeRes([{ id: 1 }]);
+  });
+
+  const promise = fetchAllLogs('key', 'app', 'query', 'from', 'to', 'label');
+  await new Promise((resolve) => setImmediate(resolve)); // 讓第 1 次失敗跑完、排進第一個 sleep timer
+  for (let i = 0; i < 5; i++) {
+    t.mock.timers.tick(10_000);
+    await new Promise((resolve) => setImmediate(resolve)); // 讓 sleep() resolve 之後的微任務鏈（重試呼叫、下一次 httpsRequest mock）跑完，才能推進下一次 tick
+  }
+  const logs = await promise;
+  assert.deepEqual(logs, [{ id: 1 }]);
+  assert.equal(call, 6, '第 6 次呼叫才成功，證明重試次數確實超過了舊版上限 3 次');
+});
+
 test('fetchAllLogs：不傳 onPage 時回傳完整陣列（既有行為不變）', async (t) => {
   let call = 0;
   t.mock.method(http, 'httpsRequest', async () => {

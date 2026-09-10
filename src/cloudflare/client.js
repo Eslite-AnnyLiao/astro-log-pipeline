@@ -83,12 +83,12 @@ async function callObservabilityAPI(accountId, apiToken, subpath, body, retries 
   try {
     res = await http.httpsRequest('POST', url, headers, JSON.stringify(body));
   } catch (err) {
-    if (retries < MAX_RETRIES) {
-      console.log(`  [網路錯誤] ${err.message}，10s 後重試 (${retries + 1}/${MAX_RETRIES})...`);
-      await http.sleep(10_000);
-      return callObservabilityAPI(accountId, apiToken, subpath, body, retries + 1);
-    }
-    throw err;
+    // 網路層錯誤不設重試上限：跟 429 不同，這通常是本機網路或中繼點的暫時性問題，
+    // 沒有「重試幾次就該放棄」的理由，就地一直重試，網路恢復就會自己接著抓（見
+    // src/datadog/client.js 對應處理的相同理由）。
+    console.log(`  [網路錯誤] ${err.message}，10s 後重試（第 ${retries + 1} 次）...`);
+    await http.sleep(10_000);
+    return callObservabilityAPI(accountId, apiToken, subpath, body, retries + 1);
   }
 
   if (DEBUG) {

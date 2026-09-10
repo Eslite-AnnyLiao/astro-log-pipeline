@@ -3,7 +3,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const http = require('../src/lib/http');
-const { fetchRoutingTargetLogs, fetchCacheHitLogs, resetRateLimiterForTests } = require('../src/cloudflare/client');
+const { fetchRoutingTargetLogs, fetchCacheHitLogs, callObservabilityAPI, resetRateLimiterForTests } = require('../src/cloudflare/client');
 
 const SLOT_MS = 4 * 3600_000; // 跟 client.js 內部 SLOT_HOURS=4 一致，測試用兩個 slot 的小範圍
 
@@ -29,6 +29,27 @@ function mockRoutingTargetBySlot(countsBySlotFrom, expectedType = 'astro-ssr') {
     return makeCfSuccess(countsBySlotFrom[from]);
   };
 }
+
+test('callObservabilityAPI：網路層錯誤不設重試上限，超過舊版 MAX_RETRIES=3 之後恢復連線仍要能成功，不能提早放棄', async (t) => {
+  resetRateLimiterForTests();
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let call = 0;
+  t.mock.method(http, 'httpsRequest', async () => {
+    call++;
+    if (call <= 5) throw new Error('模擬網路錯誤 ECONNRESET');
+    return makeCfSuccess(42);
+  });
+
+  const promise = callObservabilityAPI('acc', 'token', 'query', {});
+  await new Promise((resolve) => setImmediate(resolve)); // 讓第 1 次失敗跑完、排進第一個 sleep timer
+  for (let i = 0; i < 5; i++) {
+    t.mock.timers.tick(10_000);
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  const result = await promise;
+  assert.equal(result.result.calculations[0].aggregates[0].value, 42);
+  assert.equal(call, 6, '第 6 次呼叫才成功，證明重試次數確實超過了舊版上限 3 次');
+});
 
 test('fetchRoutingTargetLogs：不傳 opts 時兩個 slot 都查、結果正確加總', async (t) => {
   resetRateLimiterForTests();
